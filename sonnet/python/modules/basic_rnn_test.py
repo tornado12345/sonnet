@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or  implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# =============================================================================
+# ============================================================================
+
 """Tests for Recurrent cores in snt."""
 from __future__ import absolute_import
 from __future__ import division
@@ -19,8 +20,11 @@ from __future__ import print_function
 
 import itertools
 
-from nose_parameterized import parameterized
+# Dependency imports
+from absl.testing import parameterized
+import mock
 import numpy as np
+from six.moves import xrange  # pylint: disable=redefined-builtin
 import sonnet as snt
 import tensorflow as tf
 
@@ -83,7 +87,7 @@ class VanillaRNNTest(tf.test.TestCase):
     prev_state = tf.placeholder(tf.float32,
                                 shape=[self.batch_size, self.hidden_size])
     vanilla_rnn = snt.VanillaRNN(name="rnn", hidden_size=self.hidden_size)
-    output, new_state = vanilla_rnn(inputs, prev_state)
+    output, next_state = vanilla_rnn(inputs, prev_state)
     in_to_hid = vanilla_rnn.in_to_hidden_variables
     hid_to_hid = vanilla_rnn.hidden_to_hidden_variables
     with self.test_session() as sess:
@@ -92,11 +96,11 @@ class VanillaRNNTest(tf.test.TestCase):
       prev_state_data = np.random.randn(self.batch_size, self.hidden_size)
       tf.global_variables_initializer().run()
 
-      fetches = [output, new_state, in_to_hid[0], in_to_hid[1],
+      fetches = [output, next_state, in_to_hid[0], in_to_hid[1],
                  hid_to_hid[0], hid_to_hid[1]]
       output = sess.run(fetches,
                         {inputs: input_data, prev_state: prev_state_data})
-    output_v, new_state_v, in_to_hid_w, in_to_hid_b = output[:4]
+    output_v, next_state_v, in_to_hid_w, in_to_hid_b = output[:4]
     hid_to_hid_w, hid_to_hid_b = output[4:]
 
     real_in_to_hid = np.dot(input_data, in_to_hid_w) + in_to_hid_b
@@ -104,7 +108,7 @@ class VanillaRNNTest(tf.test.TestCase):
     real_output = np.tanh(real_in_to_hid + real_hid_to_hid)
 
     self.assertAllClose(real_output, output_v)
-    self.assertAllClose(real_output, new_state_v)
+    self.assertAllClose(real_output, next_state_v)
 
   def testInitializers(self):
     inputs = tf.placeholder(tf.float32, shape=[self.batch_size, self.in_size])
@@ -225,7 +229,7 @@ class VanillaRNNTest(tf.test.TestCase):
     self.assertEqual(len(regularizers), 2)
 
 
-class DeepRNNTest(tf.test.TestCase):
+class DeepRNNTest(tf.test.TestCase, parameterized.TestCase):
 
   def testShape(self):
     batch_size = 3
@@ -290,8 +294,42 @@ class DeepRNNTest(tf.test.TestCase):
              snt.VanillaRNN(name="rnn2", hidden_size=hidden2_size)]
     with self.assertRaisesRegexp(
         ValueError, "skip_connections are enabled but not all cores are "
-                    "recurrent, which is not supported"):
+                    "`snt.RNNCore`s, which is not supported"):
       snt.DeepRNN(cores, name="deep_rnn", skip_connections=True)
+
+    cells = [tf.contrib.rnn.BasicLSTMCell(5), tf.contrib.rnn.BasicLSTMCell(5)]
+    with self.assertRaisesRegexp(
+        ValueError, "skip_connections are enabled but not all cores are "
+        "`snt.RNNCore`s, which is not supported"):
+      snt.DeepRNN(cells, skip_connections=True)
+
+  def test_non_recurrent_mappings(self):
+    insize = 2
+    hidden1_size = 4
+    hidden2_size = 5
+    seq_length = 7
+    batch_size = 3
+
+    # As mentioned above, non-recurrent cores are not supported with
+    # skip connections. But test that some number of non-recurrent cores
+    # is okay (particularly as the last core) without skip connections.
+    cores1 = [snt.LSTM(hidden1_size), tf.tanh, snt.Linear(hidden2_size)]
+    core1 = snt.DeepRNN(cores1, skip_connections=False)
+    core1_h0 = core1.initial_state(batch_size=batch_size)
+
+    cores2 = [snt.LSTM(hidden1_size), snt.Linear(hidden2_size), tf.tanh]
+    core2 = snt.DeepRNN(cores2, skip_connections=False)
+    core2_h0 = core2.initial_state(batch_size=batch_size)
+
+    xseq = tf.random_normal(shape=[seq_length, batch_size, insize])
+    y1, _ = tf.nn.dynamic_rnn(
+        core1, xseq, initial_state=core1_h0, time_major=True)
+    y2, _ = tf.nn.dynamic_rnn(
+        core2, xseq, initial_state=core2_h0, time_major=True)
+
+    with self.test_session() as sess:
+      sess.run(tf.global_variables_initializer())
+      sess.run([y1, y2])
 
   def testVariables(self):
     batch_size = 3
@@ -324,10 +362,9 @@ class DeepRNNTest(tf.test.TestCase):
       self.assertRegexpMatches(
           v.name, "rnn(1|2)/(in_to_hidden|hidden_to_hidden)/(w|b):0")
 
-  @parameterized.expand([(True, True), (True, False),
-                         (False, True), (False, False)])
+  @parameterized.parameters((True, True), (True, False), (False, True),
+                            (False, False))
   def testComputation(self, skip_connections, create_initial_state):
-
     batch_size = 3
     in_size = 2
     hidden1_size = 4
@@ -413,10 +450,9 @@ class DeepRNNTest(tf.test.TestCase):
 
     self.assertAllClose(output_value, manual_out_value)
 
-  @parameterized.expand([(False, False), (False, True),
-                         (True, False), (True, True)])
+  @parameterized.parameters((False, False), (False, True), (True, False),
+                            (True, True))
   def testInitialState(self, trainable, use_custom_initial_value):
-
     batch_size = 3
     hidden1_size = 4
     hidden2_size = 5
@@ -499,27 +535,27 @@ class DeepRNNTest(tf.test.TestCase):
     deep_rnn_state = deep_rnn.initial_state(batch_size, trainable=True)
     self.assertEqual(
         deep_rnn_state[0][0].name,
-        "deep_rnn_initial_state/a_initial_state/state_0_tiled:0")
+        "deep_rnn_initial_state/a_initial_state/state_hidden_tiled:0")
     self.assertEqual(
         deep_rnn_state[0][1].name,
-        "deep_rnn_initial_state/a_initial_state/state_1_tiled:0")
+        "deep_rnn_initial_state/a_initial_state/state_cell_tiled:0")
     self.assertEqual(
         deep_rnn_state[1][0].name,
-        "deep_rnn_initial_state/b_initial_state/state_0_tiled:0")
+        "deep_rnn_initial_state/b_initial_state/state_hidden_tiled:0")
     self.assertEqual(
         deep_rnn_state[1][1].name,
-        "deep_rnn_initial_state/b_initial_state/state_1_tiled:0")
+        "deep_rnn_initial_state/b_initial_state/state_cell_tiled:0")
 
     other_start_state = deep_rnn.initial_state(
         batch_size, trainable=True, name="blah")
     self.assertEqual(other_start_state[0][0].name,
-                     "blah/a_initial_state/state_0_tiled:0")
+                     "blah/a_initial_state/state_hidden_tiled:0")
     self.assertEqual(other_start_state[0][1].name,
-                     "blah/a_initial_state/state_1_tiled:0")
+                     "blah/a_initial_state/state_cell_tiled:0")
     self.assertEqual(other_start_state[1][0].name,
-                     "blah/b_initial_state/state_0_tiled:0")
+                     "blah/b_initial_state/state_hidden_tiled:0")
     self.assertEqual(other_start_state[1][1].name,
-                     "blah/b_initial_state/state_1_tiled:0")
+                     "blah/b_initial_state/state_cell_tiled:0")
 
   def testSkipConnectionOptions(self):
     batch_size = 3
@@ -547,6 +583,57 @@ class DeepRNNTest(tf.test.TestCase):
       initial_output_res = sess.run(initial_output, feed_dict=feed_dict)
     expected_shape = (batch_size, final_hidden_size)
     self.assertSequenceEqual(initial_output_res.shape, expected_shape)
+
+  def testMLPFinalCore(self):
+    batch_size = 2
+    sequence_length = 3
+    input_size = 4
+    mlp_last_layer_size = 17
+    cores = [
+        snt.LSTM(hidden_size=10),
+        snt.nets.MLP(output_sizes=[6, 7, mlp_last_layer_size]),
+    ]
+    deep_rnn = snt.DeepRNN(cores, skip_connections=False)
+    input_sequence = tf.constant(
+        np.random.randn(sequence_length, batch_size, input_size),
+        dtype=tf.float32)
+    initial_state = deep_rnn.initial_state(batch_size=batch_size)
+    output, unused_final_state = tf.nn.dynamic_rnn(
+        deep_rnn, input_sequence,
+        initial_state=initial_state,
+        time_major=True)
+    self.assertEqual(
+        output.get_shape(),
+        tf.TensorShape([sequence_length, batch_size, mlp_last_layer_size]))
+
+  def testFinalCoreHasNoSizeWarning(self):
+    cores = [snt.LSTM(hidden_size=10), snt.Linear(output_size=42), tf.nn.relu]
+    rnn = snt.DeepRNN(cores, skip_connections=False)
+
+    with mock.patch.object(tf.logging, "warning") as mocked_logging_warning:
+      # This will produce a warning.
+      unused_output_size = rnn.output_size
+      self.assertTrue(mocked_logging_warning.called)
+      first_call_args = mocked_logging_warning.call_args[0]
+      self.assertTrue("final core %s does not have the "
+                      ".output_size field" in first_call_args[0])
+      self.assertEqual(first_call_args[2], 42)
+
+  def testNoSizeButAlreadyConnected(self):
+    batch_size = 16
+    cores = [snt.LSTM(hidden_size=10), snt.Linear(output_size=42), tf.nn.relu]
+    rnn = snt.DeepRNN(cores, skip_connections=False)
+    unused_output = rnn(tf.zeros((batch_size, 128)),
+                        rnn.initial_state(batch_size=batch_size))
+
+    with mock.patch.object(tf.logging, "warning") as mocked_logging_warning:
+      output_size = rnn.output_size
+      # Correct size is automatically inferred.
+      self.assertEqual(output_size, tf.TensorShape([42]))
+      self.assertTrue(mocked_logging_warning.called)
+      first_call_args = mocked_logging_warning.call_args[0]
+      self.assertTrue("DeepRNN has been connected into the graph, "
+                      "so inferred output size" in first_call_args[0])
 
 
 class ModelRNNTest(tf.test.TestCase):

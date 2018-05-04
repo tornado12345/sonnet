@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or  implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# =============================================================================
+# ============================================================================
+
 """Tests for snt.scale_gradient.
 """
 from __future__ import absolute_import
@@ -19,18 +20,19 @@ from __future__ import division
 from __future__ import print_function
 
 import itertools
-from nose_parameterized import parameterized
+
+# Dependency imports
+from absl.testing import parameterized
 import sonnet as snt
 import tensorflow as tf
 
 
-class ScaleGradientTest(tf.test.TestCase):
+class ScaleGradientTest(parameterized.TestCase, tf.test.TestCase):
 
-  @parameterized.expand(
-      itertools.product(range(6), [0.0, 0.1, 0.9, 1.0])
+  @parameterized.parameters(
+      *itertools.product(range(6), [0.0, 0.1, 0.9, 1.0])
   )
   def testOpScale(self, x_, scale):
-
     x = tf.placeholder(tf.float32, [1])
     y = x * x
     y = snt.scale_gradient(y, scale)
@@ -43,7 +45,7 @@ class ScaleGradientTest(tf.test.TestCase):
       if scale == 1.0:
         self.assertEqual(y.op.type, "Identity")
       else:
-        self.assertEqual(y.op.type, "ScaleGradient")
+        self.assertEqual(y.op.type, "ScaleGradient_float32")
 
       with self.test_session() as sess:
         dydx_, y_ = sess.run([dydx, y], feed_dict={x: [x_]})
@@ -75,6 +77,14 @@ class ScaleGradientTest(tf.test.TestCase):
     y = snt.scale_gradient(x, 0.1)
     shape = tuple(y.get_shape().as_list())
     self.assertEqual(shape, (None, 10, 13))
+
+  def testOpScaleDifferentDtypes(self):
+    x_1 = tf.placeholder(tf.float16, shape=())
+    snt.scale_gradient(x_1, 0.1)
+
+    # clip_gradient throws here if the Defun func_name does not use the dtype.
+    x_2 = tf.placeholder(tf.float32, shape=())
+    snt.scale_gradient(x_2, 0.1)
 
 
 if __name__ == "__main__":

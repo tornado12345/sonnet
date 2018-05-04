@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or  implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# =============================================================================
+# ============================================================================
+
 """Sequential Module for TensorFlow snt.
 
 A Module that wraps a list of other modules and ops, connecting the output of
@@ -21,7 +22,9 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+# Dependency imports
 from sonnet.python.modules import base
+import tensorflow as tf
 
 
 class Sequential(base.AbstractModule):
@@ -35,8 +38,10 @@ class Sequential(base.AbstractModule):
   method that are passed to the constituents of the module - for example,
   if there is a `BatchNorm` module in `Sequential` and the user wishes to switch
   the `is_training` flag. If this is the desired use case, the recommended
-  solution is to use `snt.Module` to wrap a custom function, as shown in
-  module_with_build_args.py in the example folder.
+  solution is to use `snt.Module` to wrap a custom function, as shown in the
+  following example:
+
+  https://github.com/deepmind/sonnet/examples/module_with_build_args.py
   """
 
   def __init__(self, layers, name="sequential"):
@@ -83,6 +88,16 @@ class Sequential(base.AbstractModule):
     """
     net = args
 
+    if not self._layers:
+      # If the sequential is passed a single arg, this will end up being
+      # wrapped in an extra layer of tuple by *args. Normally we internally
+      # handle this in the loop below, but if there are no layers we unpack here
+      # in order to make Sequential([]) act like an identity, which seems right.
+      if len(args) == 1:
+        return args[0]
+      else:
+        return args
+
     for layer in self._layers:
       if isinstance(net, tuple):
         net = layer(*net)
@@ -94,3 +109,16 @@ class Sequential(base.AbstractModule):
   @property
   def layers(self):
     return self._layers
+
+  def get_variables(self, *args, **kwargs):
+    """Provide a warning that get_variables on Sequential always returns ()."""
+    tf.logging.warning(
+        "Calling Sequential.get_variables, which will always return an empty "
+        "tuple. get_variables() can only return variables created directly by "
+        "a Module, or created by submodules directly created inside the "
+        "Module. Sequential is constructed from already constructed submodules "
+        "and so this will always be empty. See the documentation for more "
+        "details, but tl;dr if you need to connect some modules sequentially "
+        "and call get_variables on the result, writing a simple custom module "
+        "is the simplest way. Another option is to call get_all_variables().")
+    return super(Sequential, self).get_variables(*args, **kwargs)

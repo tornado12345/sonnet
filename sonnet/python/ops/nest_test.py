@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or  implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# =============================================================================
+# ============================================================================
+
 """Tests for sonnet.python.ops.nest.
 """
 from __future__ import absolute_import
@@ -20,160 +21,17 @@ from __future__ import print_function
 
 import collections
 
+# Dependency imports
+
 import numpy as np
+import six
 from sonnet.python.ops import nest
 import tensorflow as tf
 
+typekw = "class" if six.PY3 else "type"
+
 
 class NestTest(tf.test.TestCase):
-
-  def testAssertShallowStructure(self):
-    inp_ab = ["a", "b"]
-    inp_abc = ["a", "b", "c"]
-    with self.assertRaises(ValueError) as cm:
-      nest.assert_shallow_structure(inp_abc, inp_ab)
-    self.assertEqual(cm.exception.message,
-                     "The two structures don't have the same sequence length. "
-                     "Input structure has length 2, while shallow structure "
-                     "has length 3.")
-
-    inp_ab1 = [(1, 1), (2, 2)]
-    inp_ab2 = [[1, 1], [2, 2]]
-    with self.assertRaises(TypeError) as cm:
-      nest.assert_shallow_structure(inp_ab2, inp_ab1)
-    self.assertEqual(cm.exception.message,
-                     "The two structures don't have the same sequence type. "
-                     "Input structure has type <type 'tuple'>, while shallow "
-                     "structure has type <type 'list'>.")
-
-  def testFlattenUpTo(self):
-    # Normal application (Example 1).
-    input_tree = [[[2, 2], [3, 3]], [[4, 9], [5, 5]]]
-    shallow_tree = [[True, True], [False, True]]
-    flattened_input_tree = nest.flatten_up_to(shallow_tree, input_tree)
-    flattened_shallow_tree = nest.flatten_up_to(shallow_tree, shallow_tree)
-    self.assertEqual(flattened_input_tree, [[2, 2], [3, 3], [4, 9], [5, 5]])
-    self.assertEqual(flattened_shallow_tree, [True, True, False, True])
-
-    # Normal application (Example 2).
-    input_tree = [[("a", 1), [("b", 2), [("c", 3), [("d", 4)]]]]]
-    shallow_tree = [["level_1", ["level_2", ["level_3", ["level_4"]]]]]
-    input_tree_flattened_as_shallow_tree = nest.flatten_up_to(shallow_tree,
-                                                              input_tree)
-    input_tree_flattened = nest.flatten(input_tree)
-    self.assertEqual(input_tree_flattened_as_shallow_tree,
-                     [("a", 1), ("b", 2), ("c", 3), ("d", 4)])
-    self.assertEqual(input_tree_flattened, ["a", 1, "b", 2, "c", 3, "d", 4])
-
-    ## Shallow non-list edge-case.
-    # Using iterable elements.
-    input_tree = ["input_tree"]
-    shallow_tree = "shallow_tree"
-    flattened_input_tree = nest.flatten_up_to(shallow_tree, input_tree)
-    flattened_shallow_tree = nest.flatten_up_to(shallow_tree, shallow_tree)
-    self.assertEqual(flattened_input_tree, [input_tree])
-    self.assertEqual(flattened_shallow_tree, [shallow_tree])
-
-    input_tree = ["input_tree_0", "input_tree_1"]
-    shallow_tree = "shallow_tree"
-    flattened_input_tree = nest.flatten_up_to(shallow_tree, input_tree)
-    flattened_shallow_tree = nest.flatten_up_to(shallow_tree, shallow_tree)
-    self.assertEqual(flattened_input_tree, [input_tree])
-    self.assertEqual(flattened_shallow_tree, [shallow_tree])
-
-    # Using non-iterable elements.
-    input_tree = [0]
-    shallow_tree = 9
-    flattened_input_tree = nest.flatten_up_to(shallow_tree, input_tree)
-    flattened_shallow_tree = nest.flatten_up_to(shallow_tree, shallow_tree)
-    self.assertEqual(flattened_input_tree, [input_tree])
-    self.assertEqual(flattened_shallow_tree, [shallow_tree])
-
-    input_tree = [0, 1]
-    shallow_tree = 9
-    flattened_input_tree = nest.flatten_up_to(shallow_tree, input_tree)
-    flattened_shallow_tree = nest.flatten_up_to(shallow_tree, shallow_tree)
-    self.assertEqual(flattened_input_tree, [input_tree])
-    self.assertEqual(flattened_shallow_tree, [shallow_tree])
-
-    ## Both non-list edge-case.
-    # Using iterable elements.
-    input_tree = "input_tree"
-    shallow_tree = "shallow_tree"
-    flattened_input_tree = nest.flatten_up_to(shallow_tree, input_tree)
-    flattened_shallow_tree = nest.flatten_up_to(shallow_tree, shallow_tree)
-    self.assertEqual(flattened_input_tree, [input_tree])
-    self.assertEqual(flattened_shallow_tree, [shallow_tree])
-
-    # Using non-iterable elements.
-    input_tree = 0
-    shallow_tree = 0
-    flattened_input_tree = nest.flatten_up_to(shallow_tree, input_tree)
-    flattened_shallow_tree = nest.flatten_up_to(shallow_tree, shallow_tree)
-    self.assertEqual(flattened_input_tree, [input_tree])
-    self.assertEqual(flattened_shallow_tree, [shallow_tree])
-
-    ## Input non-list edge-case.
-    # Using iterable elements.
-    input_tree = "input_tree"
-    shallow_tree = ["shallow_tree"]
-    with self.assertRaises(TypeError) as cm:
-      flattened_input_tree = nest.flatten_up_to(shallow_tree, input_tree)
-    flattened_shallow_tree = nest.flatten_up_to(shallow_tree, shallow_tree)
-    self.assertEqual(cm.exception.message,
-                     "If shallow structure is a sequence, input must also "
-                     "be a sequence. Input has type: <type 'str'>.")
-    self.assertEqual(flattened_shallow_tree, shallow_tree)
-
-    input_tree = "input_tree"
-    shallow_tree = ["shallow_tree_9", "shallow_tree_8"]
-    with self.assertRaises(TypeError) as cm:
-      flattened_input_tree = nest.flatten_up_to(shallow_tree, input_tree)
-    flattened_shallow_tree = nest.flatten_up_to(shallow_tree, shallow_tree)
-    self.assertEqual(cm.exception.message,
-                     "If shallow structure is a sequence, input must also "
-                     "be a sequence. Input has type: <type 'str'>.")
-    self.assertEqual(flattened_shallow_tree, shallow_tree)
-
-    # Using non-iterable elements.
-    input_tree = 0
-    shallow_tree = [9]
-    with self.assertRaises(TypeError) as cm:
-      flattened_input_tree = nest.flatten_up_to(shallow_tree, input_tree)
-    flattened_shallow_tree = nest.flatten_up_to(shallow_tree, shallow_tree)
-    self.assertEqual(cm.exception.message,
-                     "If shallow structure is a sequence, input must also "
-                     "be a sequence. Input has type: <type 'int'>.")
-    self.assertEqual(flattened_shallow_tree, shallow_tree)
-
-    input_tree = 0
-    shallow_tree = [9, 8]
-    with self.assertRaises(TypeError) as cm:
-      flattened_input_tree = nest.flatten_up_to(shallow_tree, input_tree)
-    flattened_shallow_tree = nest.flatten_up_to(shallow_tree, shallow_tree)
-    self.assertEqual(cm.exception.message,
-                     "If shallow structure is a sequence, input must also "
-                     "be a sequence. Input has type: <type 'int'>.")
-    self.assertEqual(flattened_shallow_tree, shallow_tree)
-
-  def testMapUpTo(self):
-    # Example 1.
-    ab_tuple = collections.namedtuple("ab_tuple", "a, b")
-    op_tuple = collections.namedtuple("op_tuple", "add, mul")
-    inp_val = ab_tuple(a=2, b=3)
-    inp_ops = ab_tuple(a=op_tuple(add=1, mul=2), b=op_tuple(add=2, mul=3))
-    out = nest.map_up_to(inp_val, lambda val, ops: (val + ops.add) * ops.mul,
-                         inp_val, inp_ops)
-    self.assertEqual(out.a, 6)
-    self.assertEqual(out.b, 15)
-
-    # Example 2.
-    data_list = [[2, 4, 6, 8], [[1, 3, 5, 7, 9], [3, 5, 7]]]
-    name_list = ["evens", ["odds", "primes"]]
-    out = nest.map_up_to(name_list,
-                         lambda name, sec: "first_{}_{}".format(len(sec), name),
-                         name_list, data_list)
-    self.assertEqual(out, ["first_4_evens", ["first_5_odds", "first_3_primes"]])
 
   def testStringRepeat(self):
     ab_tuple = collections.namedtuple("ab_tuple", "a, b")
@@ -234,7 +92,8 @@ class NestTest(tf.test.TestCase):
     self.assertEqual((45, (46, 49)), output)
 
   def testNoSequences(self):
-    with self.assertRaisesRegexp(ValueError, "Cannot map over no sequences"):
+    with self.assertRaisesRegexp(ValueError,
+                                 "Must provide at least one structure"):
       nest.map(lambda x: x)
 
   def testEmptySequences(self):
@@ -248,6 +107,83 @@ class NestTest(tf.test.TestCase):
     # This is checking actual equality of types, empty list != empty tuple
     self.assertNotEqual((), nest.map(f, []))
 
+  def testFlattenAndPackIterable(self):
+    # A nice messy mix of tuples, lists, dicts, and `OrderedDict`s.
+    named_tuple = collections.namedtuple("A", ("b", "c"))
+    mess = [
+        "z",
+        named_tuple(3, 4),
+        {
+            "c": [
+                1,
+                collections.OrderedDict([
+                    ("b", 3),
+                    ("a", 2),
+                ]),
+            ],
+            "b": 5
+        },
+        17
+    ]
+
+    flattened = nest.flatten_iterable(mess)
+    self.assertEqual(flattened, ["z", 3, 4, 5, 1, 2, 3, 17])
+
+    structure_of_mess = [
+        14,
+        named_tuple("a", True),
+        {
+            "c": [
+                0,
+                collections.OrderedDict([
+                    ("b", 9),
+                    ("a", 8),
+                ]),
+            ],
+            "b": 3
+        },
+        "hi everybody",
+    ]
+
+    unflattened = nest.pack_iterable_as(structure_of_mess, flattened)
+    self.assertEqual(unflattened, mess)
+
+  def testFlattenIterable_numpyIsNotFlattened(self):
+    structure = np.array([1, 2, 3])
+    flattened = nest.flatten_iterable(structure)
+    self.assertEqual(len(flattened), 1)
+
+  def testFlattenIterable_stringIsNotFlattened(self):
+    structure = "lots of letters"
+    flattened = nest.flatten_iterable(structure)
+    self.assertEqual(len(flattened), 1)
+
+  def testFlatternIterable_scalarStructure(self):
+    # Tests can call flatten_iterable with single "scalar" object.
+    structure = "hello"
+    flattened = nest.flatten_iterable(structure)
+    unflattened = nest.pack_iterable_as("goodbye", flattened)
+    self.assertEqual(structure, unflattened)
+
+  def testPackIterableAs_notIterableError(self):
+    with self.assertRaisesRegexp(TypeError,
+                                 "flat_sequence must be a sequence"):
+      nest.pack_iterable_as("hi", "bye")
+
+  def testPackIterableAs_scalarStructureError(self):
+    with self.assertRaisesRegexp(
+        ValueError, r"Structure is a scalar but len\(flat_sequence\) == 2 > 1"):
+      nest.pack_iterable_as("hi", ["bye", "twice"])
+
+  def testPackIterableAs_wrongLengthsError(self):
+    with self.assertRaisesRegexp(
+        ValueError,
+        "Structure had 2 elements, but flat_sequence had 3 elements."):
+      nest.pack_iterable_as(["hello", "world"],
+                            ["and", "goodbye", "again"])
+
 
 if __name__ == "__main__":
   tf.test.main()
+
+

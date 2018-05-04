@@ -1,3 +1,4 @@
+# pylint: disable=g-bad-file-header
 # Copyright 2017 The Sonnet Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,18 +22,39 @@ from __future__ import print_function
 from setuptools import find_packages
 from setuptools import setup
 from setuptools.command.install import install as InstallCommandBase
+from setuptools.dist import Distribution
+from sys import version
 
 # This version string is semver compatible, but incompatible with pip.
 # For pip, we will remove all '-' characters from this string, and use the
 # result for pip.
-_VERSION = '1.0'
+_VERSION = '1.20'
 
-project_name = 'sonnet'
+# The possible sonnet project names.
+_PROJECT_NAME_CPU = 'dm-sonnet'
+_PROJECT_NAME_GPU = 'dm-sonnet-gpu'
 
-REQUIRED_PACKAGES = [
-    'tensorflow >= 1.0.1',
-    'nose_parameterized >= 0.6.0',
-]
+# This placeholder is substituted by the build script. Because we distribute
+# sonnet under two different names (dm-sonnet and dm-sonnet-gpu), we have to
+# create two "different" setup.py files.
+project_name = '%%%PROJECT_NAME%%%'
+
+# Check if the project name is valid.
+if project_name not in (_PROJECT_NAME_CPU, _PROJECT_NAME_GPU):
+  raise ValueError('Invalid project name {}.'.format(project_name))
+
+EXTRA_PACKAGES = {
+    'tensorflow': ['tensorflow>=1.0.1'],
+    'tensorflow with gpu': ['tensorflow-gpu>=1.0.1']
+}
+
+REQUIRED_PACKAGES = ['six', 'absl-py']
+
+# If this is the GPU build of sonnet, tensorflow-gpu is a hard requirement.
+# The CPU only version works well with both versions of tensorflow.
+if project_name == _PROJECT_NAME_GPU:
+  REQUIRED_PACKAGES.append('tensorflow-gpu >= 1.0.1')
+
 
 setup(
     name=project_name,
@@ -47,7 +69,7 @@ setup(
     packages=find_packages(),
     entry_points={},
     install_requires=REQUIRED_PACKAGES,
-    tests_require=REQUIRED_PACKAGES,
+    extras_require=EXTRA_PACKAGES,
     # Add in any packaged data.
     include_package_data=True,
     package_data={'': ['*.txt', '*.rst'], 'sonnet': ['*.so']},
@@ -62,7 +84,9 @@ setup(
         'Intended Audience :: Education',
         'Intended Audience :: Science/Research',
         'License :: OSI Approved :: Apache Software License',
-        'Programming Language :: Python :: 2.7',
+        'Programming Language :: Python :: {}'.format(
+            "2.7" if (version[0] == "2") else version[0]
+        ),
         'Topic :: Scientific/Engineering :: Mathematics',
         'Topic :: Software Development :: Libraries :: Python Modules',
         'Topic :: Software Development :: Libraries',

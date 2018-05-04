@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or  implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# =============================================================================
+# ============================================================================
+
 """Batch normalization module for Sonnet.
 
 This contains the module BatchNorm, which performs batch normalization on
@@ -22,11 +23,12 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+# Dependency imports
 from sonnet.python.modules import base
 from sonnet.python.modules import util
 import tensorflow as tf
 
-from tensorflow.contrib.layers.python.layers import utils
+from tensorflow.python.layers import utils
 from tensorflow.python.training import moving_averages
 
 
@@ -54,28 +56,31 @@ class BatchNorm(base.AbstractModule):
   """Batch normalization module, including optional affine transformation.
 
   This module maintains exponential moving averages of the mean and
-  variance, used for calculating more accurate shifted statistics at training
-  time and optionally used to normalize at test time.
-
-  In order to update the moving averages, the user must run the
-  ops in the tf.GraphKeys.UPDATE_OPS TensorFlow collection. For example:
-
-      bn = BatchNorm()
-      train_net = bn(train_inputs, is_training=True)
-      test_net = bn(test_inputs, is_training=False, test_local_stats=False)
-
-      ...
-
-      update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
-      with tf.control_dependencies(update_ops):
-        train_op = tf.group(train_op)
-
-  Then, whenever `train_op` is run so also are the moving average update ops.
+  variance, which can be optionally used to normalize at test time.
 
   At training time, batch statistics (mean, variance) are not shared between
   separate connections. The moving averages are shared between separate
   connections. At both training and test time, the optional affine
-  transformations are shared between separate connections.
+  transformation (`* gamma + beta`) is shared between separate connections.
+
+  This is also the case for distributed replica training, where the batch
+  statistics are not aggregated across replicas, but the moving averages are
+  shared globally.
+
+  When connecting the module to the graph, `is_training=True` means that
+
+    - Update ops are created to update the moving averages with the current
+      batch's statistics.
+    - Features are normalized using the *current batch's statistics*. The
+      `test_local_stats` setting is ignored. The moving averages are
+      **not** used.
+
+  whereas `is_training=False` means that
+
+    - Update ops are not created.
+    - Features are normalized using either:
+      - The test batch statistics if `test_local_stats=True` (default).
+      - The moving averages if `test_local_stats=False`.
 
   Local batch statistics are used by default at test time, but the moving
   averages can be used by specifying a flag when connecting. One often wants
@@ -85,6 +90,41 @@ class BatchNorm(base.AbstractModule):
   to use moving average statistics, since it would make evaluation agnostic to
   the batch size, and might even lead to small improvements over the local
   batch statistics.
+
+  You can either update the moving averages automatically by setting
+  `update_ops_collection=None` or by running the ops in the given collection,
+  by default tf.GraphKeys.UPDATE_OPS.
+
+  For example, to run the updates automatically:
+
+      bn = BatchNorm(update_ops_collection=None)
+      train_net = bn(train_inputs, is_training=True)
+
+  this does, however, have the effect of blocking the forwards pass of the
+  network until the update ops have been run and may have a small performance
+  penalty.
+
+  For example, to run the updates manually:
+
+      bn = BatchNorm()
+      train_net = bn(train_inputs, is_training=True)
+
+      ...
+
+      update_ops = tf.group(*tf.get_collection(tf.GraphKeys.UPDATE_OPS))
+      train_op = tf.group(train_op, update_ops)
+
+  Then, whenever `train_op` is run so also are the moving average update ops.
+
+  Some batch normalization caveats:
+
+    - Batch normalization will remove the effect of adding a bias, so e.g.
+      `use_bias=False` should be used for an immediately preceding snt.Linear
+      module.
+    - If your data batches aren't i.i.d. then batch normalization can allow your
+      network to 'cheat' by using the batch statistics to peek at the rest of
+      the batch. This can exhibit itself as a higher test score with
+      `test_local_stats=True` than `test_local_stats=False`.
   """
 
   GAMMA = "gamma"
@@ -145,7 +185,7 @@ class BatchNorm(base.AbstractModule):
       TypeError: If any of the given initializers, partitioners or regularizers
         are not callable.
     """
-    super(BatchNorm, self).__init__(name)
+    super(BatchNorm, self).__init__(name=name)
 
     self._axis = axis
     self._offset = offset
@@ -162,7 +202,7 @@ class BatchNorm(base.AbstractModule):
     self._regularizers = util.check_regularizers(
         regularizers, self.POSSIBLE_REGULARIZER_KEYS)
 
-  def _build_statistics(self, input_batch, axis, use_batch_stats, dtype):
+  def _build_statistics(self, input_batch, axis, use_batch_stats, stat_dtype):
     """Builds the statistics part of the graph when using moving variance.
 
     Args:
@@ -170,17 +210,17 @@ class BatchNorm(base.AbstractModule):
       axis: Indices of `input_batch` to reduce over.
       use_batch_stats: Boolean to indicate if batch statistics should be
         calculated, otherwise moving averages are returned.
-      dtype: TensorFlow datatype to use for the moving mean and variance.
+      stat_dtype: TensorFlow datatype to use for the moving mean and variance.
 
     Returns:
-      Tuple of (mean, variance).
+      Tuple of (mean, variance), each of the same datatype as `input_batch`.
     """
     # Set up our moving statistics. When connecting in parallel, this is shared.
     if self.MOVING_MEAN not in self._initializers:
       self._initializers[self.MOVING_MEAN] = create_mean_initializer()
     self._moving_mean = tf.get_variable(
         "moving_mean",
-        dtype=dtype,
+        dtype=stat_dtype,
         shape=self._mean_shape,
         collections=[
             tf.GraphKeys.MOVING_AVERAGE_VARIABLES,
@@ -193,7 +233,7 @@ class BatchNorm(base.AbstractModule):
       self._initializers[self.MOVING_VARIANCE] = create_variance_initializer()
     self._moving_variance = tf.get_variable(
         "moving_variance",
-        dtype=dtype,
+        dtype=stat_dtype,
         shape=self._mean_shape,
         collections=[
             tf.GraphKeys.MOVING_AVERAGE_VARIABLES,
@@ -210,10 +250,20 @@ class BatchNorm(base.AbstractModule):
       return mean, variance
 
     def build_moving_stats():
-      return (
-          tf.identity(self._moving_mean),
-          tf.identity(self._moving_variance),
-      )
+      """Retrieves the moving statistics."""
+      # If necessary, cast the moving statistics to match the input type.
+      # This is required by tf.nn.batch_normalization.
+      input_dtype = input_batch.dtype.base_dtype
+      if stat_dtype == input_dtype:
+        return (
+            tf.identity(self._moving_mean),
+            tf.identity(self._moving_variance),
+        )
+      else:
+        return (
+            tf.cast(self._moving_mean, input_dtype),
+            tf.cast(self._moving_variance, input_dtype),
+        )
 
     mean, variance = utils.smart_cond(
         use_batch_stats,
@@ -304,12 +354,15 @@ class BatchNorm(base.AbstractModule):
       # Reduce over the second dimension.
       return "NCHW"
     else:
-      raise ValueError("Invalid axis option {:s}. This does not correspond to"
+      raise ValueError("Invalid axis option {}. This does not correspond to"
                        " either the NHWC format (0, 1, 2) or the NCHW "
                        "(0, 2, 3).".format(axis))
 
   def _fused_batch_norm_op(self, input_batch, mean, variance, use_batch_stats):
     """Creates a fused batch normalization op."""
+    # Store the original shape of the mean and variance.
+    mean_shape = mean.get_shape()
+    variance_shape = variance.get_shape()
     # The fused batch norm expects the mean, variance, gamma and beta
     # tensors to have dimension 1, so we flatten them to remove the
     # extra dimensions.
@@ -340,9 +393,12 @@ class BatchNorm(base.AbstractModule):
         use_batch_stats, use_batch_stats_fused_batch_norm,
         moving_average_fused_batch_norm)
 
+    mean = tf.reshape(mean, mean_shape)
+    variance = tf.reshape(variance, variance_shape)
     return batch_norm_op, mean, variance
 
-  def _batch_norm_op(self, input_batch, mean, variance, use_batch_stats):
+  def _batch_norm_op(self, input_batch, mean, variance, use_batch_stats,
+                     stat_dtype):
     """Creates a batch normalization op.
 
     It uses the tf.nn.batch_normalization op by default and the
@@ -350,24 +406,24 @@ class BatchNorm(base.AbstractModule):
 
     Args:
       input_batch: A input Tensor of arbitrary dimension.
-      mean: A mean tensor.
-      variance: A variance tensor.
+      mean: A mean tensor, of the same dtype as `input_batch`.
+      variance: A variance tensor, of the same dtype as `input_batch`.
       use_batch_stats: A bool value that indicates whether the operation should
          use the batch statistics.
+      stat_dtype: TensorFlow datatype used for the moving mean and variance.
 
     Returns:
       A batch normalization operation.
-      The current mean tensor.
-      The current variance tensor.
+      The current mean tensor, of datatype `stat_dtype`.
+      The current variance tensor, of datatype `stat_dtype`.
     """
     if self._fused:
-      # Store the original shape of the mean and variance.
-      mean_shape = mean.get_shape()
-      variance_shape = variance.get_shape()
+      # For the non-training case where not using batch stats,
+      # pass in the moving statistic variables directly.
+      # These will already be in the correct dtype, even for float16 input.
       batch_norm_op, mean, variance = self._fused_batch_norm_op(
-          input_batch, mean, variance, use_batch_stats)
-      mean = tf.reshape(mean, mean_shape)
-      variance = tf.reshape(variance, variance_shape)
+          input_batch,
+          self._moving_mean, self._moving_variance, use_batch_stats)
     else:
       batch_norm_op = tf.nn.batch_normalization(
           input_batch,
@@ -377,15 +433,25 @@ class BatchNorm(base.AbstractModule):
           self._gamma,
           self._eps,
           name="batch_norm")
+      # We'll echo the supplied mean and variance so that they can also be used
+      # to update the moving statistics. Cast to matching type if necessary.
+      if input_batch.dtype.base_dtype != stat_dtype:
+        mean = tf.cast(mean, stat_dtype)
+        variance = tf.cast(variance, stat_dtype)
 
     return batch_norm_op, mean, variance
 
   def _build_scale_offset(self, dtype):
     """Sets up optional scale and offset factors."""
-    self._beta = None
+
+    # tf.nn.fused_batch_norm accepts float16 batch data, but not scale/offset.
+    if self._fused and dtype == tf.float16:
+      dtype = tf.float32
+
     # The fused batch norm operation needs the beta, gamma variables,
     # so in this case we build them and set the trainable option according
     # to the values of _offset and _scale.
+    self._beta = None
     if self._offset or self._fused:
       if self.BETA not in self._initializers:
         self._initializers[self.BETA] = create_beta_initializer()
@@ -411,15 +477,14 @@ class BatchNorm(base.AbstractModule):
           regularizer=self._regularizers.get(self.GAMMA, None),
           trainable=self._scale)
 
-  def _build(self, input_batch, is_training=True, test_local_stats=True):
+  def _build(self, input_batch, is_training, test_local_stats=True):
     """Connects the BatchNorm module into the graph.
 
     Args:
       input_batch: A Tensor of arbitrary dimension. By default, the final
         dimension is not reduced over when computing the minibatch statistics.
       is_training: A boolean to indicate if the module should be connected in
-        training mode, meaning the moving averages are updated. By default
-        `True`. Can be a Tensor.
+        training mode, meaning the moving averages are updated. Can be a Tensor.
       test_local_stats: A boolean to indicate if local batch statistics should
         be used when `is_training=False`. If not, moving averages are used.
         By default `True`. Can be a Tensor.
@@ -437,30 +502,27 @@ class BatchNorm(base.AbstractModule):
     if self._axis is not None:
       if len(self._axis) > len(input_shape):
         raise base.IncompatibleShapeError(
-            "Too many indices specified in axis: len({:s}) > len({:s}).".format(
+            "Too many indices specified in axis: len({}) > len({}).".format(
                 self._axis, input_shape))
 
       if max(self._axis) >= len(input_shape):
         raise base.IncompatibleShapeError(
             "One or more index in axis is too large for "
-            "input shape: {:s} >= {:d}.".format(self._axis, len(input_shape)))
+            "input shape: {} >= {:d}.".format(self._axis, len(input_shape)))
 
       if min(self._axis) < 0:
         raise base.IncompatibleShapeError(
-            "Indices in axis must be non-negative: {:s} < 0.".format(
+            "Indices in axis must be non-negative: {} < 0.".format(
                 self._axis))
 
       axis = self._axis
     else:
       # Reduce over all dimensions except the last.
-      axis = range(len(input_shape))[:-1]
+      axis = tuple(range(len(input_shape))[:-1])
 
-    # See following for important note on accuracy for dtype=tf.float16
-    dtype = input_batch.dtype
-    if dtype == tf.float16:
-      raise base.NotSupportedError(
-          "BatchNorm does not support `tf.float16`, insufficient "
-          "precision for calculating sufficient statistics.")
+    dtype = input_batch.dtype.base_dtype
+    # Maintain moving averages at a minimum precision of tf.float32.
+    stat_dtype = tf.float32 if dtype == tf.float16 else dtype
 
     self._mean_shape = input_batch.get_shape().as_list()
     for index in axis:
@@ -469,13 +531,13 @@ class BatchNorm(base.AbstractModule):
     use_batch_stats = is_training | test_local_stats
 
     mean, variance = self._build_statistics(input_batch, axis,
-                                            use_batch_stats, dtype)
+                                            use_batch_stats, stat_dtype)
 
     # Sets up optional gamma and beta parameters
     self._build_scale_offset(dtype)
     # Sets up the batch normalization op.
     out, mean, variance = self._batch_norm_op(input_batch, mean, variance,
-                                              use_batch_stats)
+                                              use_batch_stats, stat_dtype)
     # Sets up the update op.
     update_ops = self._build_update_ops(mean, variance, is_training)
 

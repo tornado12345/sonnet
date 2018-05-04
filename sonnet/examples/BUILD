@@ -12,7 +12,9 @@ py_library(
     srcs = [
         "__init__.py",
     ],
+    srcs_version = "PY2AND3",
     deps = [
+        ":brnn_ptb",
         ":module_with_build_args",
         ":rnn_shakespeare",
     ],
@@ -23,8 +25,10 @@ py_binary(
     srcs = [
         "module_with_build_args.py",
     ],
+    srcs_version = "PY2AND3",
     deps = [
         "//sonnet",
+        # tensorflow dep,
     ],
 )
 
@@ -39,8 +43,25 @@ py_binary(
         "data/ts.train.txt",
         "data/ts.valid.txt",
     ],
+    srcs_version = "PY2AND3",
     deps = [
+        # tensorflow IO dep,
         "//sonnet",
+        # tensorflow dep,
+    ],
+)
+
+py_binary(
+    name = "brnn_ptb",
+    srcs = [
+        "brnn_ptb.py",
+        "ptb_reader.py",
+    ],
+    srcs_version = "PY2AND3",
+    deps = [
+        # numpy dep,
+        "//sonnet",
+        # tensorflow dep,
     ],
 )
 
@@ -48,11 +69,20 @@ py_test(
     name = "rnn_shakespeare_test",
     size = "large",
     srcs = [
-        "dataset_shakespeare.py",
-        "rnn_shakespeare.py",
         "rnn_shakespeare_test.py",
     ],
+    srcs_version = "PY2AND3",
     deps = [
-        "//sonnet",
+        ":rnn_shakespeare",
+    ],
+)
+
+py_test(
+    name = "brnn_ptb_test",
+    size = "large",
+    srcs = ["brnn_ptb_test.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        ":brnn_ptb",
     ],
 )

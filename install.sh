@@ -24,7 +24,14 @@ function main() {
     exit 1
   fi
 
-  DEST=$1
+  # Create the directory, then do dirname on a non-existent file inside it to
+  # give us an absolute paths with tilde characters resolved to the destination
+  # directory. Readlink -f is a cleaner way of doing this but is not available
+  # on a fresh macOS install.
+  mkdir -p "$1"
+  DEST="$(dirname $1/does_not_exist)"
+  echo "=== destination directory: ${DEST}"
+
   TMPDIR=$(mktemp -d -t tmp.XXXXXXXXXX)
 
   echo $(date) : "=== Using tmpdir: ${TMPDIR}"
@@ -33,8 +40,14 @@ function main() {
 
   pushd ${TMPDIR}
   echo $(date) : "=== Building wheel"
-  python setup.py bdist_wheel >/dev/null
-  mkdir -p ${DEST}
+
+  if [[ "$2" == "" ]] ; then
+    python setup.py bdist_wheel >/dev/null
+  else
+    # Use custom location of python specified in argument:
+    "$2" setup.py bdist_wheel >/dev/null
+  fi
+
   cp dist/* ${DEST}
   popd
   rm -rf ${TMPDIR}

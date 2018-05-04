@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or  implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# =============================================================================
+# ============================================================================
+
 """Example script using `snt.Module` to make a module with build method args.
 
 `snt.Sequential` has been deliberately designed for simple use cases. In
@@ -24,7 +25,7 @@ shown in this script.
 
 To run this script (on CPU), use the following command:
 ```
-blaze run -c opt module_with_build_args
+bazel run -c opt module_with_build_args
 ```
 """
 
@@ -32,6 +33,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+# Dependency imports
 import sonnet as snt
 import tensorflow as tf
 
@@ -70,7 +72,7 @@ def main(unused_argv):
 
   with tf.Session() as sess:
     sess.run(tf.global_variables_initializer())
-    for _ in xrange(100):
+    for _ in range(100):
       sess.run(train_step)
     # Check that evaluating train_model_outputs twice returns the same value.
     train_outputs, train_outputs_2 = sess.run([train_model_outputs,
