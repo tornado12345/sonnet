@@ -20,7 +20,7 @@ from __future__ import division
 from __future__ import print_function
 
 import collections
-from functools import partial
+import functools
 import itertools
 # Dependency imports
 
@@ -33,6 +33,7 @@ import tensorflow as tf
 from tensorflow.python.ops import variables
 
 
+# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
 class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
 
   def setUp(self):
@@ -45,8 +46,8 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
 
   @parameterized.named_parameters(
       ("ConvNet2D", snt.nets.ConvNet2D),
-      ("ConvNet2DTranspose", partial(snt.nets.ConvNet2DTranspose,
-                                     output_shapes=[[100, 100]])))
+      ("ConvNet2DTranspose", functools.partial(snt.nets.ConvNet2DTranspose,
+                                               output_shapes=[[100, 100]])))
   def testName(self, module):
     unique_name = "unique_name"
     with tf.variable_scope("scope"):
@@ -60,8 +61,8 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
 
   @parameterized.named_parameters(
       ("ConvNet2D", snt.nets.ConvNet2D),
-      ("ConvNet2DTranspose", partial(snt.nets.ConvNet2DTranspose,
-                                     output_shapes=[[100, 100]])))
+      ("ConvNet2DTranspose", functools.partial(snt.nets.ConvNet2DTranspose,
+                                               output_shapes=[[100, 100]])))
   def testConstructor(self, module):
     with self.assertRaisesRegexp(ValueError,
                                  "output_channels must not be empty"):
@@ -192,6 +193,14 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
              paddings=self.paddings,
              use_bias=2)
 
+    err = "use_batch_norm must be a boolean"
+    with self.assertRaisesRegexp(TypeError, err):
+      module(output_channels=self.output_channels,
+             kernel_shapes=self.kernel_shapes,
+             strides=self.strides,
+             paddings=self.paddings,
+             use_batch_norm=[True])
+
     err = "Invalid data_format"
     # Also checks that the error works with non-string types
     for data_format in ["NHCW", 3]:
@@ -206,8 +215,8 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
   @parameterized.named_parameters(
       ("ConvNet2D", snt.nets.ConvNet2D),
       ("ConvNet2DTranspose",
-       partial(snt.nets.ConvNet2DTranspose,
-               output_shapes=[[100, 100]])))
+       functools.partial(snt.nets.ConvNet2DTranspose,
+                         output_shapes=[[100, 100]])))
   def testBatchNormBuildFlag(self, module):
     model = module(output_channels=self.output_channels,
                    kernel_shapes=self.kernel_shapes,
@@ -215,7 +224,7 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
                    paddings=self.paddings,
                    use_batch_norm=True)
     self.assertTrue(model.use_batch_norm)
-    input_to_net = tf.placeholder(tf.float32, shape=(1, 100, 100, 3))
+    input_to_net = tf.random_normal(dtype=tf.float32, shape=(1, 100, 100, 3))
 
     # Check that an error is raised if we don't specify the is_training flag
     err = "is_training flag must be explicitly specified"
@@ -225,8 +234,8 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
   @parameterized.named_parameters(
       ("ConvNet2D", snt.nets.ConvNet2D),
       ("ConvNet2DTranspose",
-       partial(snt.nets.ConvNet2DTranspose,
-               output_shapes=[[100, 100]])))
+       functools.partial(snt.nets.ConvNet2DTranspose,
+                         output_shapes=[[100, 100]])))
   def testBatchNorm(self, module):
     model = module(output_channels=self.output_channels,
                    kernel_shapes=self.kernel_shapes,
@@ -234,11 +243,11 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
                    paddings=self.paddings,
                    use_batch_norm=True)
     self.assertTrue(model.use_batch_norm)
-    input_to_net = tf.placeholder(tf.float32, shape=(1, 100, 100, 3))
+    input_to_net = tf.random_normal(dtype=tf.float32, shape=(1, 100, 100, 3))
 
     # Check Tensorflow flags work
-    is_training = tf.placeholder(tf.bool)
-    test_local_stats = tf.placeholder(tf.bool)
+    is_training = tf.constant(False)
+    test_local_stats = tf.constant(False)
 
     model(input_to_net,
           is_training=is_training,
@@ -249,9 +258,7 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
 
     model_variables = model.get_variables()
 
-    self.assertEqual(
-        len(model_variables),
-        len(self.output_channels) * 3 - 1)
+    self.assertLen(model_variables, len(self.output_channels) * 3 - 1)
 
     # Check that the appropriate moving statistics variables have been created.
     self.assertTrue(
@@ -263,8 +270,8 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
 
   @parameterized.named_parameters(
       ("ConvNet2D", snt.nets.ConvNet2D),
-      ("ConvNet2DTranspose", partial(snt.nets.ConvNet2DTranspose,
-                                     output_shapes=[[100, 100]])))
+      ("ConvNet2DTranspose", functools.partial(snt.nets.ConvNet2DTranspose,
+                                               output_shapes=[[100, 100]])))
   def testBatchNormConfig(self, module):
     batch_norm_config = {
         "scale": True,
@@ -277,19 +284,17 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
                    use_batch_norm=True,
                    batch_norm_config=batch_norm_config)
 
-    input_to_net = tf.placeholder(tf.float32, shape=(1, 100, 100, 3))
+    input_to_net = tf.random_normal(dtype=tf.float32, shape=(1, 100, 100, 3))
 
     model(input_to_net, is_training=True)
     model_variables = model.get_variables()
 
-    self.assertEqual(
-        len(model_variables),
-        len(self.output_channels) * 4 - 2)
+    self.assertLen(model_variables, len(self.output_channels) * 4 - 2)
 
   @parameterized.named_parameters(
       ("ConvNet2D", snt.nets.ConvNet2D),
-      ("ConvNet2DTranspose", partial(snt.nets.ConvNet2DTranspose,
-                                     output_shapes=[[100, 100]])))
+      ("ConvNet2DTranspose", functools.partial(snt.nets.ConvNet2DTranspose,
+                                               output_shapes=[[100, 100]])))
   def testNoBias(self, module):
     model = module(output_channels=self.output_channels,
                    kernel_shapes=self.kernel_shapes,
@@ -297,19 +302,17 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
                    paddings=self.paddings,
                    use_bias=False)
     self.assertEqual(model.use_bias, (False,) * len(self.output_channels))
-    input_to_net = tf.placeholder(tf.float32, shape=(1, 100, 100, 3))
+    input_to_net = tf.random_normal(dtype=tf.float32, shape=(1, 100, 100, 3))
     model(input_to_net)
 
     model_variables = model.get_variables()
 
-    self.assertEqual(
-        len(model_variables),
-        len(self.output_channels))
+    self.assertLen(model_variables, len(self.output_channels))
 
   @parameterized.named_parameters(
       ("ConvNet2D", snt.nets.ConvNet2D),
-      ("ConvNet2DTranspose", partial(snt.nets.ConvNet2DTranspose,
-                                     output_shapes=[[100, 100]])))
+      ("ConvNet2DTranspose", functools.partial(snt.nets.ConvNet2DTranspose,
+                                               output_shapes=[[100, 100]])))
   def testNoBiasIterable(self, module):
     use_bias = (True,) * (len(self.output_channels) - 1) + (False,)
     model = module(output_channels=self.output_channels,
@@ -328,14 +331,16 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
     self.assertEqual(model_transpose.use_bias, actual_use_biases)
     self.assertEqual(tuple(reversed(use_bias)), actual_use_biases)
 
-  @parameterized.named_parameters(
-      ("ConvNet2DNoBias", snt.nets.ConvNet2D, False),
-      ("ConvNet2DBias", snt.nets.ConvNet2D, True),
-      ("ConvNet2DTransposeNoBias", partial(snt.nets.ConvNet2DTranspose,
-                                           output_shapes=[[100, 100]]), False),
-      ("ConvNet2DTransposeBias", partial(snt.nets.ConvNet2DTranspose,
-                                         output_shapes=[[100, 100]]), True))
-  def testRegularizersInRegularizationLosses(self, module, use_bias):
+  @parameterized.named_parameters(("ConvNet2DNoBias", False, False),
+                                  ("ConvNet2DBias", False, True),
+                                  ("ConvNet2DTransposeNoBias", True, False),
+                                  ("ConvNet2DTransposeBias", True, True))
+  def testRegularizersInRegularizationLosses(self, transpose, use_bias):
+    if transpose:
+      module = functools.partial(snt.nets.ConvNet2DTranspose,
+                                 output_shapes=[[100, 100]])
+    else:
+      module = snt.nets.ConvNet2D
     if use_bias:
       regularizers = {"w": tf.contrib.layers.l1_regularizer(scale=0.5),
                       "b": tf.contrib.layers.l2_regularizer(scale=0.5)}
@@ -349,22 +354,27 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
                    use_bias=use_bias,
                    regularizers=regularizers)
 
-    input_to_net = tf.placeholder(tf.float32, shape=(1, 100, 100, 3))
+    input_to_net = tf.random_normal(dtype=tf.float32, shape=(1, 100, 100, 3))
     model(input_to_net)
 
-    graph_regularizers = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
-    self.assertRegexpMatches(graph_regularizers[0].name, ".*l1_regularizer.*")
-    if use_bias:
-      self.assertRegexpMatches(graph_regularizers[1].name, ".*l2_regularizer.*")
+    regularizers = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+    expected_num_regularizers = 3 * (2 if use_bias else 1)
+    self.assertLen(regularizers, expected_num_regularizers)
+    if not tf.executing_eagerly():
+      self.assertRegexpMatches(regularizers[0].name, ".*l1_regularizer.*")
+      if use_bias:
+        self.assertRegexpMatches(regularizers[1].name, ".*l2_regularizer.*")
 
   @parameterized.named_parameters(
       ("ConvNet2D", snt.nets.ConvNet2D, False),
       ("ConvNet2DFinal", snt.nets.ConvNet2D, True),
       ("ConvNet2DTranspose",
-       partial(snt.nets.ConvNet2DTranspose, output_shapes=[[100, 100]]),
+       functools.partial(snt.nets.ConvNet2DTranspose,
+                         output_shapes=[[100, 100]]),
        False),
       ("ConvNet2DTransposeFinal",
-       partial(snt.nets.ConvNet2DTranspose, output_shapes=[[100, 100]]),
+       functools.partial(snt.nets.ConvNet2DTranspose,
+                         output_shapes=[[100, 100]]),
        True))
   def testActivateFinal(self, module, activate_final):
     model = module(output_channels=self.output_channels,
@@ -375,16 +385,16 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
                    use_batch_norm=True,
                    use_bias=False)
     self.assertEqual(activate_final, model.activate_final)
-    input_to_net = tf.placeholder(tf.float32, shape=(1, 100, 100, 3))
+    input_to_net = tf.random_normal(dtype=tf.float32, shape=(1, 100, 100, 3))
     model(input_to_net, is_training=True)
 
     model_variables = model.get_variables()
 
     # Batch norm variable missing for final activation
     if activate_final:
-      self.assertEqual(len(model_variables), len(self.output_channels) * 2)
+      self.assertLen(model_variables, len(self.output_channels) * 2)
     else:
-      self.assertEqual(len(model_variables), len(self.output_channels) * 2 - 1)
+      self.assertLen(model_variables, len(self.output_channels) * 2 - 1)
 
     # Test transpose method's activate_final arg.
     transposed_model_activate_final = model.transpose(activate_final=True)
@@ -398,7 +408,8 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
   @parameterized.parameters(
       *itertools.product(
           [snt.nets.ConvNet2D,
-           partial(snt.nets.ConvNet2DTranspose, output_shapes=[[100, 100]])],
+           functools.partial(snt.nets.ConvNet2DTranspose,
+                             output_shapes=[[100, 100]])],
           ["kernel_shapes", "strides", "paddings", "activation", "initializers",
            "partitioners", "regularizers", "use_bias", "batch_norm_config"]))
   def testTransposeDefaultParameter(self, module, param_name):
@@ -417,14 +428,13 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
                    kernel_shapes=[[3, 3], [5, 5], [7, 7]],
                    strides=[[1, 1], [2, 2], [3, 3]],
                    paddings=[snt.SAME, snt.SAME, snt.VALID],
-                   use_batch_norm=[True, True, False],
                    use_bias=[True, True, False])
 
     # We don't pass the parameter on to .transpose, None should be the default
     transpose_model = model.transpose()
     if param_name in expected_reversed:
-      self.assertItemsEqual(reversed(getattr(model, param_name)),
-                            getattr(transpose_model, param_name))
+      self.assertEqual(tuple(reversed(getattr(model, param_name))),
+                       getattr(transpose_model, param_name))
     else:
       self.assertEqual(getattr(model, param_name),
                        getattr(transpose_model, param_name))
@@ -432,7 +442,8 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
   @parameterized.parameters(
       *itertools.product(
           [snt.nets.ConvNet2D,
-           partial(snt.nets.ConvNet2DTranspose, output_shapes=[[100, 100]])],
+           functools.partial(snt.nets.ConvNet2DTranspose,
+                             output_shapes=[[100, 100]])],
           [("kernel_shapes", [[3, 3], [3, 3], [3, 3]]),
            ("strides", [[1, 1], [1, 1], [1, 1]]),
            ("paddings", [snt.SAME, snt.SAME, snt.SAME]),
@@ -441,7 +452,7 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
            ("partitioners", {}),
            ("regularizers", {}),
            ("use_bias", [True, True, True]),
-           ("batch_norm_config", {"scale": True})]))
+           ("normalization_ctor", snt.BatchNorm)]))
   def testTransposePassThroughParameter(self, module, param_name_and_value):
     """Tests if .transpose correctly passes through the given parameters.
 
@@ -457,23 +468,22 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
                    kernel_shapes=[[3, 3], [5, 5], [7, 7]],
                    strides=[[1, 1], [2, 2], [3, 3]],
                    paddings=[snt.SAME, snt.SAME, snt.VALID],
-                   use_batch_norm=[True, True, False],
                    use_bias=[True, True, False])
 
     transpose_model = model.transpose(**{param_name: param_value})
     if isinstance(param_value, collections.Mapping):
       self.assertDictEqual(param_value, getattr(transpose_model, param_name))
     elif isinstance(param_value, collections.Iterable):
-      self.assertItemsEqual(param_value, getattr(transpose_model, param_name))
+      self.assertCountEqual(param_value, getattr(transpose_model, param_name))
     else:
       self.assertEqual(param_value, getattr(transpose_model, param_name))
 
   @parameterized.named_parameters(
       ("ConvNet2DNHWC", snt.nets.ConvNet2D, "NHWC"),
       ("ConvNet2DNCHW", snt.nets.ConvNet2D, "NCHW"),
-      ("ConvNet2DTransposeNHWC", partial(
+      ("ConvNet2DTransposeNHWC", functools.partial(
           snt.nets.ConvNet2DTranspose, output_shapes=[[100, 100]]), "NHWC"),
-      ("ConvNet2DTransposeNCHW", partial(
+      ("ConvNet2DTransposeNCHW", functools.partial(
           snt.nets.ConvNet2DTranspose, output_shapes=[[100, 100]]), "NCHW"),)
   def testDataFormat(self, module, data_format):
     net = module(
@@ -497,13 +507,91 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
       expected_output_shape = [
           batch_size, final_channel, input_height, input_width
       ]
-    input_to_net = tf.placeholder(tf.float32, shape=input_shape)
+    input_to_net = tf.random_normal(dtype=tf.float32, shape=input_shape)
 
-    output = net(input_to_net)
-    self.assertEqual(output.get_shape().as_list(), expected_output_shape)
+    if tf.executing_eagerly() and data_format == "NCHW":
+      if module == snt.nets.ConvNet2D:
+        expected_exception = tf.errors.UnimplementedError
+      else:
+        expected_exception = tf.errors.InvalidArgumentError
+      with self.assertRaisesRegexp(expected_exception, "only supports NHWC"):
+        output = net(input_to_net)
+
+    else:
+      output = net(input_to_net)
+      self.assertEqual(output.get_shape().as_list(), expected_output_shape)
+
+  @parameterized.parameters(
+      # Regular Layer Normalization
+      {"conv_ctor": snt.nets.ConvNet2D,
+       "norm_ctor": "snt.LayerNorm",
+       "norm_kwargs": {"scale": False, "offset": False}},
+      {"conv_ctor": functools.partial(
+          snt.nets.ConvNet2DTranspose, output_shapes=[[48, 64]]),
+       "norm_ctor": snt.LayerNorm,
+       "norm_kwargs": {"scale": False, "offset": False}},
+      # Instance normalization: sum over spatial dimensions but not channels.
+      {"conv_ctor": snt.nets.ConvNet2D,
+       "norm_ctor": "LayerNorm",
+       "norm_kwargs": {"scale": False, "offset": False, "axis": [1, 2]}},
+      {"conv_ctor": functools.partial(
+          snt.nets.ConvNet2DTranspose, output_shapes=[[48, 64]]),
+       "norm_ctor": snt.LayerNorm,
+       "norm_kwargs": {"scale": False, "offset": False, "axis": [1, 2]}},
+      )
+  def testNormalizations(self, conv_ctor, norm_ctor, norm_kwargs):
+    if tf.executing_eagerly():
+      self.skipTest("Cannot test normalization correctness in Eager.")
+    module = conv_ctor(
+        output_channels=[16, 16],
+        kernel_shapes=(3,),
+        strides=(1,),
+        paddings=("SAME",),
+        normalization_ctor=norm_ctor,
+        normalization_kwargs=norm_kwargs,
+        normalize_final=True,
+        activate_final=False)  # No final activation, that would un-normalize.
+    inputs = tf.random_uniform([16, 48, 64, 3])
+    output = module(inputs)
+    with tf.train.SingularMonitoredSession() as session:
+      output_np = session.run(output)
+
+    # Convert the output into something where all the dimensions that should be
+    # jointly normalized are combined to be on axis=1.
+    if "axis" in norm_kwargs and norm_kwargs["axis"] == [1, 2]:
+      # Check for instance normalization - combine spatial dimensions.
+      output_np = np.reshape(output_np, [16, -1, 3])
+    else:
+      # Check for layer normalization - combine all non-batch dimensions.
+      output_np = np.reshape(output_np, [16, -1])
+    mean = np.mean(output_np, axis=1)
+    std_dev = np.std(output_np, axis=1)
+    # High tolerance - summing across big images, this normalization is fairly
+    # approximate.
+    self.assertAllClose(mean, np.zeros_like(mean), atol=2e-2)
+    self.assertAllClose(std_dev, np.ones_like(std_dev), atol=2e-2)
+
+  @parameterized.parameters(
+      (snt.nets.ConvNet2D,
+       {"use_batch_norm": True, "normalization_ctor": snt.LayerNorm},
+       ValueError, "if use_batch_norm is specified"),
+      (functools.partial(snt.nets.ConvNet2DTranspose, output_shapes=[[48, 64]]),
+       {"use_batch_norm": True, "normalization_ctor": "LayerNorm"},
+       ValueError, "if use_batch_norm is specified"),)
+  def testNormalizationBadConfig(self, conv_ctor, conv_kwargs,
+                                 error_type, error_message):
+    """Old and new normalization flags should not be combined."""
+    with self.assertRaisesRegexp(error_type, error_message):
+      conv_ctor(
+          output_channels=[16, 16],
+          kernel_shapes=(3,),
+          strides=(1,),
+          paddings=("SAME",),
+          **conv_kwargs)
 
 
-class ConvNet2DTest(tf.test.TestCase):
+# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+class ConvNet2DTest(parameterized.TestCase, tf.test.TestCase):
 
   def setUp(self):
     super(ConvNet2DTest, self).setUp()
@@ -519,7 +607,7 @@ class ConvNet2DTest(tf.test.TestCase):
                              rates=self.rates,
                              strides=self.strides,
                              paddings=self.paddings)
-    self.assertEqual(len(net.layers), len(self.output_channels))
+    self.assertLen(net.layers, len(self.output_channels))
 
     for i, layer in enumerate(net.layers):
       self.assertEqual(layer.output_channels, self.output_channels[i])
@@ -555,7 +643,7 @@ class ConvNet2DTest(tf.test.TestCase):
     self.assertEqual("conv_net_2d_transpose", net_transpose.module_name)
 
     input_shape = [10, 100, 100, 3]
-    input_to_net = tf.placeholder(tf.float32, shape=input_shape)
+    input_to_net = tf.random_normal(dtype=tf.float32, shape=input_shape)
     # Tests that trying to connect the trasposed network before connecting the
     # original nets raises an error. The reason is that the output_shapes and
     # output_channels are laziliy evaluated and not yet known.
@@ -576,12 +664,6 @@ class ConvNet2DTest(tf.test.TestCase):
                        net.layers[-1 - i].input_shape[1:-1])
       self.assertEqual(net_transpose.layers[i].output_channels,
                        net.layers[-1 - i].input_shape[-1])
-
-    data = np.random.rand(*input_shape)
-    init = tf.global_variables_initializer()
-    with self.test_session() as sess:
-      sess.run(init)
-      sess.run(net_transposed_output, feed_dict={input_to_net: data})
 
   def testVariableMap(self):
     """Tests for regressions in variable names."""
@@ -614,7 +696,7 @@ class ConvNet2DTest(tf.test.TestCase):
                                 use_batch_norm=use_batch_norm)
 
     input_shape = [10, 100, 100, 3]
-    input_to_net = tf.placeholder(tf.float32, shape=input_shape)
+    input_to_net = tf.random_normal(dtype=tf.float32, shape=input_shape)
 
     _ = module(input_to_net, is_training=True)
 
@@ -623,6 +705,9 @@ class ConvNet2DTest(tf.test.TestCase):
     self.assertEqual(set(variable_names), correct_variable_names)
 
   def testPartitioners(self):
+    if tf.executing_eagerly():
+      self.skipTest("Eager does not support partitioned variables.")
+
     partitioners = {
         "w": tf.variable_axis_size_partitioner(10),
         "b": tf.variable_axis_size_partitioner(8),
@@ -644,6 +729,40 @@ class ConvNet2DTest(tf.test.TestCase):
       self.assertEqual(type(layer.w), variables.PartitionedVariable)
       self.assertEqual(type(layer.b), variables.PartitionedVariable)
 
+  def testCustomGetter(self):
+    custom_getter = snt.custom_getters.Context(snt.custom_getters.stop_gradient)
+    module = snt.nets.ConvNet2D(output_channels=self.output_channels,
+                                kernel_shapes=self.kernel_shapes,
+                                rates=self.rates,
+                                strides=self.strides,
+                                paddings=self.paddings,
+                                custom_getter=custom_getter)
+
+    input_shape = [10, 100, 100, 3]
+    input_to_net = tf.random_normal(dtype=tf.float32, shape=input_shape)
+
+    if tf.executing_eagerly():
+      with tf.GradientTape() as tape0:
+        out0 = module(input_to_net)
+      with tf.GradientTape() as tape1:
+        with custom_getter:
+          out1 = module(input_to_net)
+      all_vars = tf.trainable_variables()
+      out0_grads = tape0.gradient(out0, all_vars)
+      out1_grads = tape1.gradient(out1, all_vars)
+
+    else:
+      out0 = module(input_to_net)
+      with custom_getter:
+        out1 = module(input_to_net)
+      all_vars = tf.trainable_variables()
+      out0_grads = tf.gradients(out0, all_vars)
+      out1_grads = tf.gradients(out1, all_vars)
+
+    for grad in out0_grads:
+      self.assertNotEqual(None, grad)
+    self.assertEqual([None] * len(out1_grads), out1_grads)
+
   def testIncorrectRatesLength(self):
     rates = [1, 2]
     self.assertNotEqual(len(rates), len(self.output_channels))
@@ -655,8 +774,32 @@ class ConvNet2DTest(tf.test.TestCase):
                              strides=self.strides,
                              paddings=self.paddings)
 
+  @parameterized.parameters(
+      {"normalization_ctor": None,
+       "normalization_kwargs": {}},
+      {"normalization_ctor": snt.LayerNorm,
+       "normalization_kwargs": {}},
+      {"normalization_ctor": snt.LayerNorm,
+       "normalization_kwargs": {"axis": [1, 2]}},  # Instance Norm.
+      {"normalization_ctor": snt.BatchNorm,
+       "normalization_kwargs": {}})
+  def testAlwaysProvideIsTraining(self, normalization_ctor,
+                                  normalization_kwargs):
+    # Test whether we can always provide is_training=True, even when it is
+    # not supported by the underlying normalization constructor.
+    mod = snt.nets.ConvNet2D(
+        output_channels=[32, 32],
+        kernel_shapes=(3,),
+        strides=(1,),
+        paddings=("SAME",),
+        normalization_ctor=normalization_ctor,
+        normalization_kwargs=normalization_kwargs)
+    input_ = tf.random_uniform([16, 48, 48, 3])
+    _ = mod(input_, is_training=True)
 
-class ConvNet2DTransposeTest(tf.test.TestCase):
+
+# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+class ConvNet2DTransposeTest(parameterized.TestCase, tf.test.TestCase):
 
   def setUp(self):
     super(ConvNet2DTransposeTest, self).setUp()
@@ -701,7 +844,7 @@ class ConvNet2DTransposeTest(tf.test.TestCase):
                                       paddings=self.paddings)
     self.assertEqual(net.output_shapes,
                      tuple(self.output_shapes) * len(self.output_channels))
-    self.assertEqual(len(net.layers), len(self.output_channels))
+    self.assertLen(net.layers, len(self.output_channels))
 
     for i, layer in enumerate(net.layers):
       self.assertEqual(layer.output_channels, self.output_channels[i])
@@ -734,7 +877,7 @@ class ConvNet2DTransposeTest(tf.test.TestCase):
       net.transpose(output_channels=[42] * 18)
     net_transpose = net.transpose()
     input_shape = [10, 100, 100, 3]
-    input_to_net = tf.placeholder(tf.float32, shape=input_shape)
+    input_to_net = tf.random_normal(dtype=tf.float32, shape=input_shape)
     # Tests that trying to connect the trasposed network before connecting the
     # original nets raises an error. The reason is that the output_shapes and
     # output_channels are laziliy evaluated and not yet known.
@@ -755,13 +898,14 @@ class ConvNet2DTransposeTest(tf.test.TestCase):
       self.assertEqual(net_transpose.layers[i].output_channels,
                        net.layers[-1 - i].input_shape[-1])
 
-    data = np.random.rand(*input_shape)
     init = tf.global_variables_initializer()
-    with self.test_session() as sess:
-      sess.run(init)
-      sess.run(net_transposed_output, feed_dict={input_to_net: data})
+    self.evaluate(init)
+    self.evaluate(net_transposed_output)
 
   def testPartitioners(self):
+    if tf.executing_eagerly():
+      self.skipTest("Eager does not support partitioned variables.")
+
     partitioners = {
         "w": tf.variable_axis_size_partitioner(10),
         "b": tf.variable_axis_size_partitioner(8),
@@ -783,6 +927,49 @@ class ConvNet2DTransposeTest(tf.test.TestCase):
       self.assertEqual(type(layer.w), variables.PartitionedVariable)
       self.assertEqual(type(layer.b), variables.PartitionedVariable)
 
+  @parameterized.parameters(
+      {"normalization_ctor": None,
+       "normalization_kwargs": {}},
+      {"normalization_ctor": snt.LayerNorm,
+       "normalization_kwargs": {}},
+      {"normalization_ctor": snt.LayerNorm,
+       "normalization_kwargs": {"axis": [1, 2]}},  # Instance Norm.
+      {"normalization_ctor": snt.BatchNorm,
+       "normalization_kwargs": {}})
+  def testAlwaysProvideIsTraining(self, normalization_ctor,
+                                  normalization_kwargs):
+    # Test whether we can always provide is_training=True, even when it is
+    # not supported by the underlying normalization constructor.
+    mod = snt.nets.ConvNet2DTranspose(
+        output_shapes=self.output_shapes,
+        output_channels=self.output_channels,
+        kernel_shapes=self.kernel_shapes,
+        strides=self.strides,
+        paddings=self.paddings,
+        normalization_ctor=normalization_ctor,
+        normalization_kwargs=normalization_kwargs)
+    input_ = tf.random_uniform([16, 100, 100, 3])
+    _ = mod(input_, is_training=True)
+
+
+# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+class DefunTest(parameterized.TestCase, tf.test.TestCase):
+
+  @parameterized.named_parameters(
+      ("ConvNet2D", snt.nets.ConvNet2D),
+      ("ConvNet2DTranspose",
+       functools.partial(snt.nets.ConvNet2DTranspose,
+                         output_shapes=[[100, 100]])))
+  def testDefun(self, module):
+    model = module(output_channels=[2, 3, 4],
+                   kernel_shapes=[[3, 3]],
+                   strides=[1],
+                   paddings=[snt.SAME])
+
+    model = tf.contrib.eager.defun(model)
+    input_to_net = tf.random_normal([1, 100, 100, 3])
+    output = model(input_to_net)
+    self.assertListEqual(output.shape.as_list(), [1, 100, 100, 4])
 
 if __name__ == "__main__":
   tf.test.main()

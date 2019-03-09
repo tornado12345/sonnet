@@ -50,7 +50,7 @@ class TokenDataSource(object):
         the vocabulary.
     """
     def reading_function(f):
-      return list(f.read().replace("\n", self.CHAR_EOS))
+      return list(f.read().decode().replace("\n", self.CHAR_EOS))
 
     self._vocab_dict = {}
     self._inv_vocab_dict = {}
@@ -115,9 +115,10 @@ class TinyShakespeareDataset(snt.AbstractModule):
     # Generate vocab from train set.
 
     self._vocab_file = gfile.Open(
-        os.path.join(self._RESOURCE_ROOT, "ts.train.txt"))
+        os.path.join(self._RESOURCE_ROOT, "ts.train.txt"), mode="rb")
     self._data_file = gfile.Open(
-        os.path.join(self._RESOURCE_ROOT, "ts.{}.txt".format(subset)))
+        os.path.join(self._RESOURCE_ROOT, "ts.{}.txt".format(subset)),
+        mode="rb")
     self._num_steps = num_steps
     self._batch_size = batch_size
     self._random_sampling = random
@@ -234,4 +235,3 @@ class TinyShakespeareDataset(snt.AbstractModule):
       prefix = "b_{}: ".format(b) if label_batch_entries else ""
       result.append(prefix + self._data_source.decode(index_seq))
     return sep.join(result)
-

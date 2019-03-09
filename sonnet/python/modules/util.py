@@ -19,7 +19,9 @@ from __future__ import division
 from __future__ import print_function
 
 import collections
+import contextlib
 import functools
+import importlib
 import inspect
 import re
 import weakref
@@ -27,7 +29,9 @@ import weakref
 # Dependency imports
 import six
 import tensorflow as tf
+import wrapt
 
+from tensorflow.python.framework import function
 from tensorflow.python.ops import variable_scope as variable_scope_ops
 
 
@@ -375,8 +379,8 @@ def get_normalized_variable_map(scope_or_module,
   Args:
     scope_or_module: Scope or module to build map from.
     collection: Collection to restrict query to. By default this is
-        `tf.Graphkeys.VARIABLES`, which includes non-trainable variables such
-        as moving averages.
+        `tf.Graphkeys.GLOBAL_VARIABLES`, which includes non-trainable variables
+        such as moving averages.
     context: Scope or module, identical to or parent of `scope`. If given, this
         will be used as the stripped prefix. By default `None`, which means
         `context=scope`.
@@ -502,6 +506,31 @@ def _get_vars_to_collections(variables):
   return var_to_collections
 
 
+def _format_device(var):
+  """Returns the device with an annotation specifying `ResourceVariable`.
+
+  "legacy" means a normal tf.Variable while "resource" means a ResourceVariable.
+
+  For example:
+  `(legacy)`
+  `(resource)`
+  `/job:learner/task:0/device:CPU:* (legacy)`
+  `/job:learner/task:0/device:CPU:* (resource)`
+
+  Args:
+    var: The Tensorflow Variable to print.
+  """
+  if var.dtype.name.endswith("_ref"):
+    resource_var_annotation = "(legacy)"
+  else:
+    resource_var_annotation = "(resource)"
+
+  if var.device:
+    return "{} {}".format(var.device, resource_var_annotation)
+  else:
+    return resource_var_annotation
+
+
 def format_variables(variables, join_lines=True):
   """Takes a collection of variables and formats it as a table."""
   rows = []
@@ -514,7 +543,7 @@ def format_variables(variables, join_lines=True):
       shape = "undefined"
     dtype = repr(var.dtype.base_dtype).replace("tf.", "")
     coll = ", ".join(sorted(var_to_collections[var]))
-    rows.append((var.op.name, shape, dtype, coll, var.device))
+    rows.append((var.op.name, shape, dtype, coll, _format_device(var)))
   return _format_table(rows, join_lines)
 
 
@@ -529,7 +558,7 @@ def format_variable_map(variable_map, join_lines=True):
     shape = "x".join(str(dim) for dim in var.get_shape().as_list())
     dtype = repr(var.dtype.base_dtype).replace("tf.", "")
     coll = ", ".join(sorted(var_to_collections[var]))
-    rows.append((key, var.op.name, shape, dtype, coll, var.device))
+    rows.append((key, var.op.name, shape, dtype, coll, _format_device(var)))
   return _format_table(rows, join_lines)
 
 
@@ -537,7 +566,9 @@ def log_variables(variables=None):
   """Logs variable information.
 
   This function logs the name, shape, type, collections, and device for either
-  all variables or a given iterable of variables.
+  all variables or a given iterable of variables. In the "Device" columns,
+  the nature of the variable (legacy or resource (for ResourceVariables)) is
+  also specified in parenthesis.
 
   Args:
     variables: iterable of variables; if not provided, then all variables
@@ -547,6 +578,83 @@ def log_variables(variables=None):
     variables = tf.global_variables() + tf.local_variables()
   for row in format_variables(variables, join_lines=False):
     tf.logging.info(row)
+
+
+def _num_bytes_to_human_readable(num_bytes):
+  """Returns human readable string of how much memory `num_bytes` fills."""
+  if num_bytes < (2 ** 10):
+    return "%d B" % num_bytes
+  elif num_bytes < (2 ** 20):
+    return "%.3f KB" % (float(num_bytes) / (2 ** 10))
+  elif num_bytes < (2 ** 30):
+    return "%.3f MB" % (float(num_bytes) / (2 ** 20))
+  else:
+    return "%.3f GB" % (float(num_bytes) / (2 ** 30))
+
+
+def summarize_variables(variables=None):
+  """Logs a summary of variable information.
+
+  This function groups Variables by dtype and prints out the number of Variables
+  and the total number of scalar values for each datatype, as well as the total
+  memory consumed.
+
+  For Variables of type tf.string, the memory usage cannot be accurately
+  calculated from the Graph as the memory requirements change based on what
+  strings are actually stored, which can only be determined inside a session.
+  In this case, the amount of memory used to stored the pointers to the strings
+  is logged, along with a warning.
+
+  Args:
+    variables: iterable of variables; if not provided, then all variables
+      (in the default graph) are summarized.
+  """
+
+  variable_counts = count_variables_by_type(variables=variables)
+  total_num_scalars = 0
+  total_num_bytes = 0
+
+  # Sort by string representation of type name, so output is deterministic.
+  for dtype in sorted(variable_counts,
+                      key=lambda dtype: "%r" % dtype):
+    var_info_for_type = variable_counts[dtype]
+    num_bytes = var_info_for_type["num_scalars"] * dtype.size
+    total_num_scalars += var_info_for_type["num_scalars"]
+    total_num_bytes += num_bytes
+    tf.logging.info("%r: %d variables comprising %d scalars, %s",
+                    dtype, var_info_for_type["num_variables"],
+                    var_info_for_type["num_scalars"],
+                    _num_bytes_to_human_readable(num_bytes))
+
+
+def count_variables_by_type(variables=None):
+  """Returns a dict mapping dtypes to number of variables and scalars.
+
+  Args:
+    variables: iterable of `tf.Variable`s, or None. If None is passed, then all
+      global and local variables in the current graph are used.
+
+  Returns:
+    A dict mapping tf.dtype keys to a dict containing the keys 'num_scalars' and
+      'num_variables'.
+  """
+  if variables is None:
+    variables = tf.global_variables() + tf.local_variables()
+  unique_types = set(v.dtype.base_dtype for v in variables)
+  results_dict = {}
+  for dtype in unique_types:
+    if dtype == tf.string:
+      tf.logging.warning(
+          "NB: string Variables present. The memory usage for these  Variables "
+          "will not be accurately computed as it depends on the exact strings "
+          "stored in a particular session.")
+    vars_of_type = [v for v in variables if v.dtype.base_dtype == dtype]
+    num_scalars = sum(v.shape.num_elements() for v in vars_of_type)
+    results_dict[dtype] = {
+        "num_variables": len(vars_of_type),
+        "num_scalars": num_scalars
+    }
+  return results_dict
 
 
 def reuse_variables(method):
@@ -585,13 +693,31 @@ def reuse_variables(method):
   output = module.add_x(input_tensor)
   ```
 
+  For performance when executing eagerly it may be desirable to additionally
+  annotate these methods using `defun`, such that they are encapsulated as
+  graph functions. This is not recommended if your method returns a variable
+  since the output of `defun` would be an op that returned the variable's value
+  when evaluated (rather than the variable instance).
+
+  ```python
+  class FooModule(snt.AbstractModule):
+    def _build(self, inputs):
+      return complex_math(inputs)
+
+    @tfe.defun
+    @snt.reuse_variables
+    def more_complex_stuff(self, inputs):
+      return more_complex_math(inputs)
+  ```
+
   Args:
     method: The method to wrap.
 
   Returns:
     The wrapped method.
   """
-  initialized_variable_scopes = weakref.WeakKeyDictionary()
+  initialized_variable_scopes_eager = set()
+  initialized_variable_scopes_graph = weakref.WeakKeyDictionary()
 
   # Ensure that the argument passed in is really a method by checking that the
   # first positional argument to it is "self".
@@ -601,8 +727,23 @@ def reuse_variables(method):
   if not is_method:
     raise TypeError("reuse_variables can only be used with methods.")
 
-  @functools.wraps(method)
-  def wrapper(obj, *args, **kwargs):
+  @wrapt.decorator
+  def eager_test(method, obj, args, kwargs):
+    """Validates runtime state in eager mode."""
+    # If @reuse_variables is combined with @property, obj is passed in args
+    # and method is still unbound at this stage.
+    if obj is None:
+      obj = args[0]
+
+    if tf.executing_eagerly() and not hasattr(obj, "_template"):
+      raise ValueError(
+          "reuse_variables is not supported in eager mode except in Sonnet "
+          "modules.")
+
+    return method(*args, **kwargs)
+
+  @wrapt.decorator
+  def call_method(method, obj, args, kwargs):
     """Calls `method` with a variable scope whose reuse flag is set correctly.
 
     The first time the wrapper is called it creates a
@@ -659,9 +800,10 @@ def reuse_variables(method):
       ```
 
     Args:
+      method: The method to wrap.
       obj: The object instance passed to the wrapped method.
-      *args: The positional arguments (Tensors) passed to the wrapped method.
-      **kwargs: The keyword arguments passed to the wrapped method.
+      args: The positional arguments (Tensors) passed to the wrapped method.
+      kwargs: The keyword arguments passed to the wrapped method.
 
     Returns:
       Output of the wrapped method.
@@ -671,6 +813,11 @@ def reuse_variables(method):
                   and a variable_scope keyword argument is also provided.
     """
 
+    # If @reuse_variables is combined with @property, obj is passed in args
+    # and method is still unbound at this stage.
+    if obj is None:
+      obj = args[0]
+
     def default_context_manager(reuse=None):
       variable_scope = obj.variable_scope
       return tf.variable_scope(variable_scope, reuse=reuse)
@@ -678,16 +825,25 @@ def reuse_variables(method):
     variable_scope_context_manager = getattr(obj, "_enter_variable_scope",
                                              default_context_manager)
 
-    graph = tf.get_default_graph()
-    if graph not in initialized_variable_scopes:
-      initialized_variable_scopes[graph] = set()
-    initialized_variable_scopes_for_graph = initialized_variable_scopes[graph]
+    with tf.init_scope():
+      # We need `init_scope` incase we're running inside a defun. In that case
+      # what we want is information about where the function will be called not
+      # where the function is being built.
+      graph = tf.get_default_graph()
+      will_call_in_eager_context = tf.executing_eagerly()
+
+    if will_call_in_eager_context:
+      initialized_variable_scopes = initialized_variable_scopes_eager
+    else:
+      if graph not in initialized_variable_scopes_graph:
+        initialized_variable_scopes_graph[graph] = set()
+      initialized_variable_scopes = initialized_variable_scopes_graph[graph]
 
     # Temporarily enter the variable scope to capture it
     with variable_scope_context_manager() as tmp_variable_scope:
       variable_scope = tmp_variable_scope
 
-    reuse = variable_scope.name in initialized_variable_scopes_for_graph
+    reuse = variable_scope.name in initialized_variable_scopes
 
     # Enter the pure variable scope with reuse correctly set
     with variable_scope_ops._pure_variable_scope(  # pylint:disable=protected-access
@@ -704,21 +860,22 @@ def reuse_variables(method):
         with tf.name_scope(method_name_scope) as scope:
           if hasattr(obj, "_capture_variables"):
             with obj._capture_variables():  # pylint: disable=protected-access
-              out_ops = method(obj, *args, **kwargs)
+              out_ops = method(*args, **kwargs)
           else:
-            out_ops = method(obj, *args, **kwargs)
-      initialized_variable_scopes_for_graph.add(pure_variable_scope.name)
+            out_ops = method(*args, **kwargs)
+      initialized_variable_scopes.add(pure_variable_scope.name)
       try:
         # If `obj` is a Sonnet module, let it know it's been connected
-        # to the TF graph
-        method_positional_args = [obj] + list(args)
-        obj._add_connected_subgraph(  # pylint: disable=protected-access
-            method, out_ops, scope, *method_positional_args, **kwargs)
+        # to the TF graph.
+        obj._is_connected = True  # pylint: disable=protected-access
+        if not tf.executing_eagerly():
+          obj._add_connected_subgraph(  # pylint: disable=protected-access
+              method, out_ops, scope, *args, **kwargs)
       except AttributeError:
         pass
     return out_ops
 
-  return wrapper
+  return eager_test(call_method(method))  # pylint: disable=no-value-for-parameter
 
 
 def name_for_callable(func):
@@ -750,3 +907,232 @@ def to_snake_case(camel_case):
   underscored = re.sub(r"([a-z])([0-9][^_]*)", r"\1_\2", underscored)
   # Remove any underscores at start or end of name and convert to lowercase.
   return underscored.strip("_").lower()
+
+
+@function.Defun(
+    python_grad_func=lambda x, dy: tf.convert_to_tensor(dy),
+    shape_func=lambda op: [op.inputs[0].get_shape()])
+def convert_gradient_to_tensor(x):
+  """Identity operation whose gradient is converted to a `Tensor`.
+
+  Currently, the gradient to `tf.concat` is particularly expensive to
+  compute if dy is an `IndexedSlices` (a lack of GPU implementation
+  forces the gradient operation onto CPU).  This situation occurs when
+  the output of the `tf.concat` is eventually passed to `tf.gather`.
+  It is sometimes faster to convert the gradient to a `Tensor`, so as
+  to get the cheaper gradient for `tf.concat`.  To do this, replace
+  `tf.concat(x)` with `convert_gradient_to_tensor(tf.concat(x))`.
+
+  Args:
+    x: A `Tensor`.
+
+  Returns:
+    The input `Tensor`.
+  """
+  return x
+
+
+def sort_by_name(variables):
+  """Returns a tuple of `variables` sorted ascending by name."""
+  return tuple(sorted(variables, key=lambda v: v.name))
+
+
+@contextlib.contextmanager
+def notify_about_new_variables(callback):
+  """Calls `callback(var)` for all newly created variables.
+
+  Callback should not modify the variable passed in. Use cases that require
+  variables to be modified should use `variable_creator_scope` directly and sit
+  within the variable creator stack.
+
+  >>> variables = []
+  >>> with notify_about_variables(variables.append):
+  ...   v = tf.Variable(1.0, name='v')
+  ...   w = tf.get_variable('w', [])
+  >>> assert variables == [v, w]
+
+  Args:
+    callback: a callable taking a single argument which is a tf.Variable.
+
+  Yields:
+    `None` - used for contextmanager API.
+  """
+  def _tracking_creator(getter, **kwargs):
+    v = getter(**kwargs)
+    callback(v)
+    return v
+
+  with tf.variable_creator_scope(_tracking_creator):
+    yield
+
+
+def deprecation_warning(deprecation_message):
+  """Log a warning message the user is using deprecated functionality."""
+
+  tf.logging.log_first_n(tf.logging.WARN, deprecation_message, 1)
+
+
+def _recursive_getattr(module, path):
+  """Recursively gets attributes inside `module` as specified by `path`."""
+  if "." not in path:
+    return getattr(module, path)
+  else:
+    first, rest = path.split(".", 1)
+    return _recursive_getattr(getattr(module, first), rest)
+
+
+def parse_string_to_constructor(ctor_string):
+  """Returns a callable which corresponds to the constructor string.
+
+  Various modules (eg, ConvNet2D) take constructor arguments which are
+  callables, indicating a submodule to build. These can be passed as
+  actual constructors, eg `snt.LayerNorm`, however that makes the config
+  for that module not trivially serializable. This function tries to map
+  a string representation to the underlying callable, allowing configs to
+  remain serializable where necessary.
+
+  Args:
+    ctor_string: string representing some module in Sonnet. If the string is
+      provided with no dots, we assume it is a member of Sonnet available at
+      top level, i.e. "LayerNorm" maps to `snt.LayerNorm`.
+
+  Raises:
+    ValueError: if no matching constructor can be found.
+
+  Returns:
+    Callable constructor which corresponds to `ctor_string`.
+  """
+  orig_ctor_string = ctor_string
+  if "." not in ctor_string:
+    # No module specified - assume part of Sonnet
+    ctor_string = "sonnet." + ctor_string
+
+  if ctor_string.startswith("snt."):
+    # Replace common short name with full name
+    ctor_string = "sonnet." + ctor_string[len("snt."):]
+
+  # Cannot just use importlib directly because of the way we alias subpackages,
+  # i.e. 'sonnet.nets.ConvNet2D' does not work because 'sonnet.nets' is actually
+  # stored as 'sonnet.python.modules.nets'. To support these aliases we use
+  # importlib only for the top level package, and then recursive getattr.
+  package_name, rest = ctor_string.split(".", 1)
+  package = importlib.import_module(package_name)
+  try:
+    return _recursive_getattr(package, rest)
+  except AttributeError:
+    raise ValueError("could not find `{}`, after normalizing to `{}`".format(
+        orig_ctor_string, ctor_string))
+
+
+# Pseudo-enum for the return valeus from supports_kwargs.
+ # The kwargs in quesion are definitely accepted by the module / function.
+SUPPORTED = "supported"
+
+# The kwargs in question are definitely not suppored by the module / function.
+NOT_SUPPORTED = "not_supported"
+
+# The kwargs in question may be supported by the module / function, but we
+# cannot say for sure because the function takes **kwargs.
+MAYBE_SUPPORTED = "maybe_supported"
+
+
+def supports_kwargs(module_or_fn, kwargs_list):
+  """Determines whether the provided callable supports all the kwargs.
+
+  This is useful when you have a module that might or might not support a
+  kwarg such as `is_training`. Rather than calling the module and catching the
+  error, risking the potential modification of underlying state, this function
+  introspects the module to see what kwargs are actually supported, using
+  the python `inspect` module.
+
+  Note that many TF functions do not export a valid argspec object, rather they
+  have a generic *args, **kwargs signature due to various layers of wrapping
+  (deprecation decorators, etc). In those circumstances we return
+  MAYBE_SUPPORTED, and users will have to use another method to tell whether
+  the kwargs are supported (e.g. by just calling the function).
+
+  Args:
+    module_or_fn: some callable, generally an object or a method of some object.
+      If an object is provided, we check wither `module_or_fn.__call__` supports
+      the provided kwargs, which for a Sonnet module will automatically check
+      the signature of _build. If `module_or_fn` is a function/method, then
+      we check its signature directly, so non-Sonnet functions can be used.
+    kwargs_list: string or iterable of strings of keyword arg names to test for.
+      If an empty iterable is provided this function will always return True.
+
+  Raises:
+    ValueError: if a non-string is provided in `kwargs_list`.
+
+  Returns:
+    a string, one of 'supported', 'not_supported' or 'maybe_supported'.
+  """
+  if isinstance(kwargs_list, six.string_types):
+    kwargs_list = [kwargs_list]
+
+  # If it's not a function or method, then assume it's a module, so introspect
+  # the __call__ method. wrapt ensures that for Sonnet modules the _build
+  # signature is available here.
+  if not (inspect.isfunction(module_or_fn) or inspect.ismethod(module_or_fn)):
+    module_or_fn = module_or_fn.__call__
+
+  arg_spec = inspect.getargspec(module_or_fn)
+
+  # If there is a keywords element, then an arbitrary kwargs will work, as far
+  # as we can tell from here.
+  takes_arbitrary_kwargs = (arg_spec.keywords is not None)
+
+  for kwarg in kwargs_list:
+    if not isinstance(kwarg, six.string_types):
+      raise ValueError("kwargs should be strings, instead got {}".format(
+          kwarg))
+    if kwarg not in arg_spec.args:
+      if not takes_arbitrary_kwargs:
+        # The function doesn't take **kwargs, and this name is not in the
+        # regular args, so it would definitely cause an error to call this.
+        return NOT_SUPPORTED
+      else:
+        # The function may accept the kwarg, but we can't say for sure. Even
+        # though this is only one kwarg, we can't be certain about the whole
+        # lot, so the combined answer is now "maybe".
+        return MAYBE_SUPPORTED
+  # All the kwargs must actually be present in the specific args list
+  return SUPPORTED
+
+
+def remove_unsupported_kwargs(module_or_fn, all_kwargs_dict):
+  """Removes any kwargs not supported by `module_or_fn` from `all_kwargs_dict`.
+
+  A new dict is return with shallow copies of keys & values from
+  `all_kwargs_dict`, as long as the key is accepted by module_or_fn. The
+  returned dict can then be used to connect `module_or_fn` (along with some
+  other inputs, ie non-keyword arguments, in general).
+
+  `snt.supports_kwargs` is used to tell whether a given kwarg is supported. Note
+  that this method may give false negatives, which would lead to extraneous
+  removals in the result of this function. Please read the docstring for
+  `snt.supports_kwargs` for details, and manually inspect the results from this
+  function if in doubt.
+
+  Args:
+    module_or_fn: some callable which can be interrogated by
+      `snt.supports_kwargs`. Generally a Sonnet module or a method (wrapped in
+      `@reuse_variables`) of a Sonnet module.
+    all_kwargs_dict: a dict containing strings as keys, or None.
+
+  Raises:
+    ValueError: if `all_kwargs_dict` is not a dict.
+
+  Returns:
+    A dict containing some subset of the keys and values in `all_kwargs_dict`.
+    This subset may be empty. If `all_kwargs_dict` is None, this will be an
+    empty dict.
+  """
+  if all_kwargs_dict is None:
+    all_kwargs_dict = {}
+  if not isinstance(all_kwargs_dict, dict):
+    raise ValueError("all_kwargs_dict must be a dict with string keys.")
+  return {
+      kwarg: value for kwarg, value in all_kwargs_dict.items()
+      if supports_kwargs(module_or_fn, kwarg) != NOT_SUPPORTED
+  }
+

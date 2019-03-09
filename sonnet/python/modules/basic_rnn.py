@@ -25,14 +25,15 @@ from __future__ import print_function
 import collections
 
 # Dependency imports
+import six
 
+from sonnet.python.modules import base
 from sonnet.python.modules import basic
 from sonnet.python.modules import rnn_core
 from sonnet.python.modules import util
 import tensorflow as tf
 
-from tensorflow.python.framework import tensor_shape
-from tensorflow.python.util import nest
+nest = tf.contrib.framework.nest
 
 
 def _get_flat_core_sizes(cores):
@@ -48,8 +49,8 @@ def _get_flat_core_sizes(cores):
   core_sizes_lists = []
   for core in cores:
     flat_output_size = nest.flatten(core.output_size)
-    core_sizes_lists.append([tensor_shape.as_shape(size).as_list()
-                             for size in flat_output_size])
+    core_sizes_lists.append(
+        [tf.TensorShape(size).as_list() for size in flat_output_size])
   return core_sizes_lists
 
 
@@ -250,9 +251,9 @@ class DeepRNN(rnn_core.RNNCore):
       cores: iterable of modules or ops.
       skip_connections: a boolean that indicates whether to use skip
         connections. This means that the input is fed to all the layers, after
-        being concatenated with the output of the previous layer. The output
-        of the module will be the concatenation of all the outputs of the
-        internal modules.
+        being concatenated on the last dimension with the output of the previous
+        layer. The output of the module will be the concatenation of all the
+        outputs of the internal modules.
       concat_final_output_if_skip: A boolean that indicates whether the outputs
         of intermediate layers should be concatenated into the timestep-wise
         output of the core. By default this is True. If this is set to False,
@@ -276,9 +277,10 @@ class DeepRNN(rnn_core.RNNCore):
                                for core in self._cores]
 
     if self._skip_connections:
-      tf.logging.warning(
-          "The `skip_connections` argument will be deprecated. Please use "
-          "snt.SkipConnectionCore instead."
+      tf.logging.log_first_n(
+          tf.logging.WARN,
+          "The `skip_connections` argument will be deprecated.",
+          1
       )
       if not all(self._is_recurrent_list):
         raise ValueError("skip_connections are enabled but not all cores are "
@@ -287,6 +289,7 @@ class DeepRNN(rnn_core.RNNCore):
       self._check_cores_output_sizes()
 
     self._num_recurrent = sum(self._is_recurrent_list)
+    self._last_output_size = None
 
   def _check_cores_output_sizes(self):
     """Checks the output_sizes of the cores of the DeepRNN module.
@@ -301,10 +304,11 @@ class DeepRNN(rnn_core.RNNCore):
         if core_list[1:] != first_core_list:
           raise ValueError("The outputs of the provided cores are not able "
                            "to be concatenated along the first feature "
-                           "dimension. Core 0 has size %s, whereas Core %d "
-                           "has size %s" % (first_core_list, i, core_list))
+                           "dimension. Core 0 has shape %s, whereas Core %d "
+                           "has shape %s - these must only differ in the first "
+                           "dimension" % (core_sizes[0], i + 1, core_list))
 
-  def _build(self, inputs, prev_state):
+  def _build(self, inputs, prev_state, **kwargs):
     """Connects the DeepRNN module into the graph.
 
     If this is not the first time the module has been connected to the graph,
@@ -318,6 +322,8 @@ class DeepRNN(rnn_core.RNNCore):
         least an initial batch dimension.
       prev_state: a tuple of `prev_state`s that corresponds to the state
         of each one of the cores of the `DeepCore`.
+      **kwargs: optional kwargs to be passed to the `_build` of all sub-modules.
+        E.g. is_training=True. Note all sub-modules must accept the given kwarg.
 
     Returns:
       output: a nested tuple of Tensors of arbitrary dimensionality, with at
@@ -336,34 +342,31 @@ class DeepRNN(rnn_core.RNNCore):
     next_states = []
     outputs = []
     recurrent_idx = 0
+    concatenate = lambda *args: tf.concat(args, axis=-1)
     for i, core in enumerate(self._cores):
       if self._skip_connections and i > 0:
-        flat_input = (nest.flatten(inputs), nest.flatten(current_input))
-        flat_input = [tf.concat(input_, 1) for input_ in zip(*flat_input)]
-        current_input = nest.pack_sequence_as(structure=inputs,
-                                              flat_sequence=flat_input)
+        current_input = nest.map_structure(concatenate, inputs, current_input)
 
       # Determine if this core in the stack is recurrent or not and call
       # accordingly.
       if self._is_recurrent_list[i]:
         current_input, next_state = core(current_input,
-                                         prev_state[recurrent_idx])
+                                         prev_state[recurrent_idx],
+                                         **kwargs)
         next_states.append(next_state)
         recurrent_idx += 1
       else:
-        current_input = core(current_input)
+        current_input = core(current_input, **kwargs)
 
       if self._skip_connections:
         outputs.append(current_input)
 
     if self._skip_connections and self._concat_final_output_if_skip:
-      flat_outputs = tuple(nest.flatten(output) for output in outputs)
-      flat_outputs = [tf.concat(output, 1) for output in zip(*flat_outputs)]
-      output = nest.pack_sequence_as(structure=outputs[0],
-                                     flat_sequence=flat_outputs)
+      output = nest.map_structure(concatenate, *outputs)
     else:
       output = current_input
 
+    self._last_output_size = _get_shape_without_batch_dimension(output)
     return output, tuple(next_states)
 
   def initial_state(self, batch_size, dtype=tf.float32, trainable=False,
@@ -436,7 +439,7 @@ class DeepRNN(rnn_core.RNNCore):
       output_size = []
       for core_sizes in zip(*tuple(_get_flat_core_sizes(self._cores))):
         added_core_size = core_sizes[0]
-        added_core_size[0] = sum([size[0] for size in core_sizes])
+        added_core_size[-1] = sum([size[-1] for size in core_sizes])
         output_size.append(tf.TensorShape(added_core_size))
       return nest.pack_sequence_as(structure=self._cores[0].output_size,
                                    flat_sequence=output_size)
@@ -455,17 +458,13 @@ class DeepRNN(rnn_core.RNNCore):
         return final_core.output_size
 
       # If we have connected the module at least once, we can get the output
-      # size of whatever was actually produced. The indexing of [-1] gets us
-      # the most recent connection, and [0] gets us the first element of the
-      # output tuple as opposed to the recurrent state.
-      if self._connected_subgraphs:
-        last_connected_output_size = _get_shape_without_batch_dimension(
-            self._connected_subgraphs[-1].outputs[0])
+      # size of whatever was actually produced.
+      if self._last_output_size is not None:
         tf.logging.warning(
             "Final core does not contain .output_size, but the "
             "DeepRNN has been connected into the graph, so inferred output "
-            "size as %s", last_connected_output_size)
-        return last_connected_output_size
+            "size as %s", self._last_output_size)
+        return self._last_output_size
 
       # If all else fails, iterate backwards through cores and return the
       # first one which has an output_size field. This can be incorrect in
@@ -544,3 +543,154 @@ class ModelRNN(rnn_core.RNNCore):
   @property
   def output_size(self):
     return self._output_size
+
+
+class BidirectionalRNN(base.AbstractModule):
+  """Bidirectional RNNCore that processes the sequence forwards and backwards.
+
+    Based upon the encoder implementation in: https://arxiv.org/abs/1409.0473
+
+  This interface of this module is different than the typical ones found in
+  the RNNCore family.  The primary difference is that it is pre-conditioned on
+  the full input sequence in order to produce a full sequence of outputs and
+  states concatenated along the feature dimension among the forward and
+  backward cores.
+  """
+
+  def __init__(self, forward_core, backward_core, name="bidir_rnn"):
+    """Construct a Bidirectional RNN core.
+
+    Args:
+      forward_core: callable RNNCore module that computes forward states.
+      backward_core: callable RNNCore module that computes backward states.
+      name: name of the module.
+
+    Raises:
+      ValueError: if not all the modules are recurrent.
+    """
+    super(BidirectionalRNN, self).__init__(name=name)
+    self._forward_core = forward_core
+    self._backward_core = backward_core
+    def _is_recurrent(core):
+      has_rnn_core_interface = (hasattr(core, "initial_state") and
+                                hasattr(core, "output_size") and
+                                hasattr(core, "state_size"))
+      return isinstance(core, rnn_core.RNNCore) or has_rnn_core_interface
+    if not(_is_recurrent(forward_core) and _is_recurrent(backward_core)):
+      raise ValueError("Forward and backward cores must both be instances of"
+                       "RNNCore.")
+
+  def _build(self, input_sequence, state):
+    """Connects the BidirectionalRNN module into the graph.
+
+    Args:
+      input_sequence: tensor (time, batch, [feature_1, ..]). It must be
+          time_major.
+      state: tuple of states for the forward and backward cores.
+
+    Returns:
+      A dict with forward/backard states and output sequences:
+
+        "outputs":{
+            "forward": ...,
+            "backward": ...},
+        "state": {
+            "forward": ...,
+            "backward": ...}
+
+    Raises:
+      ValueError: in case time dimension is not statically known.
+    """
+    input_shape = input_sequence.get_shape()
+    if input_shape[0] is None:
+      raise ValueError("Time dimension of input (dim 0) must be statically"
+                       "known.")
+    seq_length = int(input_shape[0])
+    forward_state, backward_state = state
+
+    # Lists for the forward backward output and state.
+    output_sequence_f = []
+    output_sequence_b = []
+
+    # Forward pass over the sequence.
+    with tf.name_scope("forward_rnn"):
+      core_state = forward_state
+      for i in six.moves.range(seq_length):
+        core_output, core_state = self._forward_core(
+            input_sequence[i, :,], core_state)
+
+        output_sequence_f.append((core_output, core_state))
+
+      output_sequence_f = nest.map_structure(
+          lambda *vals: tf.stack(vals), *output_sequence_f)
+
+    # Backward pass over the sequence.
+    with tf.name_scope("backward_rnn"):
+      core_state = backward_state
+      for i in six.moves.range(seq_length - 1, -1, -1):
+        core_output, core_state = self._backward_core(
+            input_sequence[i, :,], core_state)
+
+        output_sequence_b.append((core_output, core_state))
+
+      output_sequence_b = nest.map_structure(
+          lambda *vals: tf.stack(vals), *output_sequence_b)
+
+    # Compose the full output and state sequeneces.
+    return {
+        "outputs": {
+            "forward": output_sequence_f[0],
+            "backward": output_sequence_b[0]
+        },
+        "state": {
+            "forward": output_sequence_f[1],
+            "backward": output_sequence_b[1]
+        }
+    }
+
+  def initial_state(self, batch_size, dtype=tf.float32, trainable=False,
+                    trainable_initializers=None, trainable_regularizers=None,
+                    name=None):
+    """Builds the default start state for a BidirectionalRNN.
+
+    The Bidirectional RNN flattens the states of its forward and backward cores
+    and concatentates them.
+
+    Args:
+      batch_size: An int, float or scalar Tensor representing the batch size.
+      dtype: The data type to use for the state.
+      trainable: Boolean that indicates whether to learn the initial state.
+      trainable_initializers: An initializer function or nested structure of
+          functions with same structure as the `state_size` property of the
+          core, to be used as initializers of the initial state variable.
+      trainable_regularizers: Optional regularizer function or nested structure
+        of functions with the same structure as the `state_size` property of the
+        core, to be used as regularizers of the initial state variable. A
+        regularizer should be a function that takes a single `Tensor` as an
+        input and returns a scalar `Tensor` output, e.g. the L1 and L2
+        regularizers in `tf.contrib.layers`.
+      name: Optional string used to prefix the initial state variable names, in
+          the case of a trainable initial state. If not provided, defaults to
+          the name of the module.
+
+    Returns:
+      Tuple of initial states from forward and backward RNNs.
+    """
+    name = "state" if name is None else name
+    forward_initial_state = self._forward_core.initial_state(
+        batch_size, dtype, trainable, trainable_initializers,
+        trainable_regularizers, name=name+"_forward")
+    backward_initial_state = self._backward_core.initial_state(
+        batch_size, dtype, trainable, trainable_initializers,
+        trainable_regularizers, name=name+"_backward")
+    return forward_initial_state, backward_initial_state
+
+  @property
+  def state_size(self):
+    """Flattened state size of cores."""
+    return self._forward_core.state_size, self._backward_core.state_size
+
+  @property
+  def output_size(self):
+    """Flattened output size of cores."""
+    return self._forward_core.output_size, self._backward_core.output_size

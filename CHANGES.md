@@ -1,5 +1,109 @@
 # Sonnet Changelog
 
+## Version 1.30 - Tuesday, 12. February 2019
+
+* Added a class to linear transform the concatenation of a list of Tensors.
+* Extended support for lower precision inputs in Layer Norm.
+
+## Version 1.29 - Tuesday, 29. January 2019
+
+* Increased Python 3 support.
+* Fixed dependency issues in setup.py
+* Module connection stacks are now thread local.
+* Nested modules now register reused variables in `_all_variables`.
+* `snt.ACTCore` now allows the user to specify a maximum number of pondering steps.
+* Added an end-to-end example of how to train an MLP with Sonnet.
+* `reuse_vars` is not an experimental decorator anymore. Change `snt.experimental.reuse_vars` to `@snt.reuse_variables`.
+* Change how documentation is being handled. We are not using Sphinx to render the page anymore, and using MkDocs instead. The markdown files used to generate it are now in the `docs` directory and available to read in GitHub.
+* Change documentation template.
+
+
+## Version 1.28 - Tuesday, 18. December 2018
+
+* Fix incorrect package name in `setup.py.tmpl`.
+* kwargs are forwarded to submodules in `DeepRNN`.
+* Add `supports_kwargs` function to reflect on whether a module can support
+  a certain kwarg.
+* Filter kwargs passed to the normalizer in `ConvNet2D` / `ConvNet2dTranspose`.
+  Any kwargs definitely not supported by the lower level function will be
+  removed. If the normalizer has a generic argspec (e.g. if it has `**kwargs`
+  in the signature) then nothing will be removed.
+* Support non-2D recurrent state in pondering RNN.
+* Logging utility function.
+* Various doc & typo fixes.
+
+## Version 1.27 - Tuesday, 20. November 2018
+
+* **Backwards Incompatible change**: Change `Embed` to use standard deviation
+  of 1 to initialize embedding variables.
+* Allow normalization scheme to be customised in `ConvNet2D`.
+* Print type of variables (legacy/resource) in `log_variables()`.
+* Support more padding options in `_ConvND`.
+* Allow `LayerNorm` to use >2 dimensional input.
+* Make `SkipConnectionCore` and `ResidualCore` explicitly call the initial state
+  and zero state methods of the wrapped cores.
+* Fix key scaling in `RelationalMemory`.
+
+
+## Version 1.26 - Monday, 22. October 2018
+
+* Ensure that dependency version checks are made before libraries are imported.
+
+
+## Version 1.25 - Tuesday, 16. October 2018
+
+* Improve Eager support.
+* Allow Sonnet modules to defun wrap their reuse_variables methods.
+* Depend on tensorflow_probability rather than `tf.contrib.distributions`.
+* VQ-VAE: allow unknown batch dimension.
+* Change axis to -1 in concat in `DeepRNN` when using skip_connections.
+* Add `rate` argument to the `SeparableConv[1,2]D` classes.
+* Add argument-overriding custom getter that only updates defaults.
+* Add dropout & clone() to `MLP`.
+* Add Learn to Execute example for Relational Memory Core to examples.
+* Add `snt.count_variables_by_type()`.
+* Documentation fixes.
+
+## Version 1.24 - Tuesday, 31. July 2018
+
+* Better integration with Tensorflow's Eager Mode.
+* `snt.LSTMBlockCell` is now a class.
+* Added semantic versioning to check compatibility with Tensorflow.
+* `RNNCellWrapper` and `wrap_rnn_cell_class` are now in the public namespace.
+* A TensorFlow RNNCell can now be wrapped as an RNNCore.
+* `ConvLSTM` corrected to apply bias only once.
+* `Conv1DLSTM` and `Conv2DLSTM` now  support Layer Norm.
+* Added `override_args` custom getter.
+* `snt.reuse_variables` now keeps the signature of the original method.
+* `VectorQuantizerEMA` now supports return of `encoding_indices`.
+* Added a bidirectional recurrent core.
+* Added support for `tf.bfloat16`.
+* Added demo for Relational Memory Core for "nth farthest" task from
+  "Relational recurrent neural networks" (Santoro et al., 2018; available
+  in https://arxiv.org/abs/1806.01822).
+* Added option to densify gradients in `snt.Embed`.
+
+
+## Version 1.23 - Tuesday, 05. June 2018
+
+* Add `snt.RelationalMemory`, implementation of "Relational Recurrent Neural
+  Networks", Santoro et al., 2018.
+* Fix error message in `snt.DeepRNN`.
+
+## Version 1.22 - Friday, 01. June 2018
+
+* Fix Python 3 compatibility issues in VQVAE notebook.
+* Make Bayesian RNN tests more hermetic.
+* Make the convolutional module use private member variables if possible.
+
+## Version 1.21 - Wednesday, 30. May 2018
+
+* Add VQ-VAE plus EMA variant.
+* Add Jupyter Notebook demonstrating VQ-VAE training.
+* Add snt.SeparableConv1D.
+* ConvNet2D now supports custom getters.
+* Add snt.summarize_variables.
+
 ## Version 1.20 - Tuesday, 24. April 2018
 
 * Merge SeparableConv2D into _ConvND.
@@ -221,4 +325,3 @@ as a unit when saving checkpoints / model snapshots with tf.Saver. The option is
 set to False by default, for backwards compatibility reasons.
 * `snt.Linear.transpose` creates a new module which now uses the same
 partitioners as the parent module.
-

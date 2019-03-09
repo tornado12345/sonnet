@@ -370,6 +370,97 @@ class Linear(base.AbstractModule, base.Transposable):
                   name=name)
 
 
+class ConcatLinear(base.AbstractModule):
+  """Linear transformation of a number of concatenated inputs.
+
+  This class ensures that at initialisation, the relative importance of all
+  inputs are similar even if they have very different sizes. This assumes
+  that all inputs have roughly the same range of values.
+
+  For example, the following code also concatenates a list of inputs and applies
+  a linear transform:
+  ```
+  inp = tf.concat(input_list, axis=-1)
+  return snt.Linear(output_size)(inp)
+  ```
+  The issue with the above code is that if `input_list` is made of two Tensors
+  of very different shapes such as `[batch_size, 1]` and `[batch_size, 128]`,
+  then almost no signal will be received from the first Tensor. This class works
+  around this problem by using a weight matrix with relatively larger
+  coefficients for the first Tensor than for the second one.
+  """
+
+  def __init__(self,
+               output_size,
+               use_bias=True,
+               initializers=None,
+               partitioners=None,
+               regularizers=None,
+               custom_getter=None,
+               name="concat_linear"):
+    """Constructs a ConcatLinear module.
+
+    Args:
+      output_size: Output dimensionality. `output_size` can be either an integer
+          or a callable. In the latter case, since the function invocation is
+          deferred to graph construction time, the user must only ensure that
+          output_size can be called, returning an integer, when build is called.
+      use_bias: Whether to include bias parameters. Default `True`.
+      initializers: Optional dict containing initializers to initialize the
+          weights (with key 'w') or biases (with key 'b'). The default
+          initializer for the weights is a truncated normal initializer, which
+          is commonly used when the inputs are zero centered (see
+          https://arxiv.org/pdf/1502.03167v3.pdf). The default initializer for
+          the bias is a zero initializer.
+      partitioners: Optional dict containing partitioners to partition
+          weights (with key 'w') or biases (with key 'b'). As a default, no
+          partitioners are used.
+      regularizers: Optional dict containing regularizers for the weights
+        (with key 'w') and the biases (with key 'b'). As a default, no
+        regularizers are used. A regularizer should be a function that takes
+        a single `Tensor` as an input and returns a scalar `Tensor` output, e.g.
+        the L1 and L2 regularizers in `tf.contrib.layers`.
+      custom_getter: Callable or dictionary of callables to use as
+        custom getters inside the module. If a dictionary, the keys
+        correspond to regexes to match variable names. See the `tf.get_variable`
+        documentation for information about the custom_getter API.
+      name: Name of the module.
+    """
+    super(ConcatLinear, self).__init__(name=name, custom_getter=custom_getter)
+    self._output_size = output_size
+    self._use_bias = use_bias
+    self._initializers = initializers
+    self._partitioners = partitioners
+    self._regularizers = regularizers
+
+  def _build(self, inputs_list):
+    """Connects the module into the graph.
+
+    If this is not the first time the module has been connected to the graph,
+    the Tensors provided here must have the same final dimensions as when called
+    the first time, in order for the existing variables to be the correct size
+    for the multiplication. The batch size may differ for each connection.
+
+    Args:
+      inputs_list: A list of 2D Tensors of rank 2, with leading batch dimension.
+
+    Returns:
+      A 2D Tensor of size [batch_size, output_size].
+    """
+    outputs = []
+    for idx, tensor in enumerate(inputs_list):
+      outputs.append(
+          Linear(
+              self._output_size,
+              initializers=self._initializers,
+              partitioners=self._partitioners,
+              regularizers=self._regularizers,
+              # Since we are interpreting this as 'one big linear', we only need
+              # one bias.
+              use_bias=(idx == 0 and self._use_bias))(tensor))
+    return tf.add_n(outputs)
+
+
 def calculate_bias_shape(input_shape, bias_dims):
   """Calculate `bias_shape` based on the `input_shape` and `bias_dims`.
 
@@ -437,7 +528,7 @@ class AddBias(base.AbstractModule, base.Transposable):
           over (given size of 1), and leading dimensions will be removed
           completely. For example, for an input of [batch_size, dim1_size,
           dim2_size, dim3_size] and `bias_dims=[1, 3]`, the resulting
-          bias will have shape [dim1_size, 1, dim2_size]. The default is to
+          bias will have shape [dim1_size, 1, dim3_size]. The default is to
           retain all dimensions apart from the minibatch dimension. Trying to
           retain the bias shape over the minibatch dimension, e.g.
           `bias_dims=[0]`, will result in an error at build time. See the
@@ -576,7 +667,7 @@ class AddBias(base.AbstractModule, base.Transposable):
 
     bias = self._b
     if multiplier != 1:
-      bias *= multiplier
+      bias = bias * multiplier  # pylint: disable=g-no-augmented-assignment
     outputs = inputs + bias
     return outputs
 
@@ -1222,16 +1313,43 @@ class MergeDims(base.AbstractModule):
       raise ValueError("`size` should be strictly greater than 1.")
 
   def _merge(self, tensor):
-    output_shape = tensor.get_shape().as_list()
-    rank = len(output_shape)
-    if rank < self._start + self._size:
+    static_input_shape = tensor.get_shape().as_list()
+    rank = len(static_input_shape)
+    start = self._start
+    if start < 0:
+      start += rank  # uses negative indexing from right
+
+    if rank < start + self._size:
       raise ValueError("Rank of inputs must be at least {}."
                        .format(self._start + self._size))
 
-    # Update the shape of the merged dimensions.
-    output_shape[self._start:self._start + self._size] = [-1]
+    initial = static_input_shape[:start]
+    middle = static_input_shape[start:start + self._size]
+    final = static_input_shape[start + self._size:]
+    if None in middle:
+      middle = [None]
+    else:
+      middle = [np.prod(middle)]
+    static_shape = initial + middle + final
 
-    return tf.reshape(tensor, shape=output_shape)
+    if static_shape.count(None) + static_shape.count(0) <= 1:
+      # At most one undefined (or zero) dimension, so tf.reshape can handle this
+      # case.
+      static_shape = [-1 if i is None else i for i in static_shape]
+      return tf.reshape(tensor, static_shape)
+    else:
+      # Need to compute output shape dynamically.
+      dynamic_input_shape = tf.shape(tensor)
+      dynamic_initial = dynamic_input_shape[:start]
+      dynamic_middle = tf.reduce_prod(
+          dynamic_input_shape[start:start + self._size], keep_dims=True)
+      dynamic_final = dynamic_input_shape[start + self._size:]
+      dynamic_shape = tf.concat(
+          [dynamic_initial, dynamic_middle, dynamic_final], axis=0)
+
+      tensor = tf.reshape(tensor, dynamic_shape)
+      tensor.set_shape(static_shape)  # give it some static shape information
+      return tensor
 
   def _build(self, inputs):
     """Connects the MergeDims module into the graph.

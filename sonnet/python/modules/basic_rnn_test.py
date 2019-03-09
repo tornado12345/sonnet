@@ -18,6 +18,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import collections
 import itertools
 
 # Dependency imports
@@ -31,6 +32,7 @@ import tensorflow as tf
 from tensorflow.python.ops import variables
 
 
+# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
 class VanillaRNNTest(tf.test.TestCase):
 
   def setUp(self):
@@ -40,9 +42,10 @@ class VanillaRNNTest(tf.test.TestCase):
     self.hidden_size = 18
 
   def testShape(self):
-    inputs = tf.placeholder(tf.float32, shape=[self.batch_size, self.in_size])
-    prev_state = tf.placeholder(tf.float32,
-                                shape=[self.batch_size, self.hidden_size])
+    inputs = tf.ones(
+        dtype=tf.float32, shape=[self.batch_size, self.in_size])
+    prev_state = tf.ones(
+        dtype=tf.float32, shape=[self.batch_size, self.hidden_size])
     vanilla_rnn = snt.VanillaRNN(name="rnn", hidden_size=self.hidden_size)
     output, next_state = vanilla_rnn(inputs, prev_state)
     shape = np.ndarray((self.batch_size, self.hidden_size))
@@ -51,9 +54,10 @@ class VanillaRNNTest(tf.test.TestCase):
 
   def testVariables(self):
     mod_name = "rnn"
-    inputs = tf.placeholder(tf.float32, shape=[self.batch_size, self.in_size])
-    prev_state = tf.placeholder(tf.float32,
-                                shape=[self.batch_size, self.hidden_size])
+    inputs = tf.ones(
+        dtype=tf.float32, shape=[self.batch_size, self.in_size])
+    prev_state = tf.ones(
+        dtype=tf.float32, shape=[self.batch_size, self.hidden_size])
     vanilla_rnn = snt.VanillaRNN(name=mod_name, hidden_size=self.hidden_size)
     self.assertEqual(vanilla_rnn.scope_name, mod_name)
     with self.assertRaisesRegexp(snt.Error, "not instantiated yet"):
@@ -74,32 +78,31 @@ class VanillaRNNTest(tf.test.TestCase):
         v for v in rnn_variables
         if v.name == "%s/hidden_to_hidden/b:0" % mod_name)
     self.assertShapeEqual(np.ndarray((self.in_size, self.hidden_size)),
-                          in_to_hidden_w.initial_value)
+                          tf.convert_to_tensor(in_to_hidden_w))
     self.assertShapeEqual(np.ndarray(self.hidden_size),
-                          in_to_hidden_b.initial_value)
+                          tf.convert_to_tensor(in_to_hidden_b))
     self.assertShapeEqual(np.ndarray((self.hidden_size, self.hidden_size)),
-                          hidden_to_hidden_w.initial_value)
+                          tf.convert_to_tensor(hidden_to_hidden_w))
     self.assertShapeEqual(np.ndarray(self.hidden_size),
-                          hidden_to_hidden_b.initial_value)
+                          tf.convert_to_tensor(hidden_to_hidden_b))
 
   def testComputation(self):
-    inputs = tf.placeholder(tf.float32, shape=[self.batch_size, self.in_size])
-    prev_state = tf.placeholder(tf.float32,
-                                shape=[self.batch_size, self.hidden_size])
+    input_data = np.random.randn(self.batch_size, self.in_size)
+    prev_state_data = np.random.randn(self.batch_size, self.hidden_size)
+    inputs = tf.convert_to_tensor(input_data)
+    prev_state = tf.convert_to_tensor(prev_state_data)
     vanilla_rnn = snt.VanillaRNN(name="rnn", hidden_size=self.hidden_size)
     output, next_state = vanilla_rnn(inputs, prev_state)
     in_to_hid = vanilla_rnn.in_to_hidden_variables
     hid_to_hid = vanilla_rnn.hidden_to_hidden_variables
-    with self.test_session() as sess:
-      # With random data, check the TF calculation matches the Numpy version.
-      input_data = np.random.randn(self.batch_size, self.in_size)
-      prev_state_data = np.random.randn(self.batch_size, self.hidden_size)
-      tf.global_variables_initializer().run()
 
-      fetches = [output, next_state, in_to_hid[0], in_to_hid[1],
-                 hid_to_hid[0], hid_to_hid[1]]
-      output = sess.run(fetches,
-                        {inputs: input_data, prev_state: prev_state_data})
+    # With random data, check the TF calculation matches the Numpy version.
+    self.evaluate(tf.global_variables_initializer())
+
+    fetches = [output, next_state, in_to_hid[0], in_to_hid[1],
+               hid_to_hid[0], hid_to_hid[1]]
+    output = self.evaluate(fetches)
+
     output_v, next_state_v, in_to_hid_w, in_to_hid_b = output[:4]
     hid_to_hid_w, hid_to_hid_b = output[4:]
 
@@ -111,9 +114,10 @@ class VanillaRNNTest(tf.test.TestCase):
     self.assertAllClose(real_output, next_state_v)
 
   def testInitializers(self):
-    inputs = tf.placeholder(tf.float32, shape=[self.batch_size, self.in_size])
-    prev_state = tf.placeholder(tf.float32,
-                                shape=[self.batch_size, self.hidden_size])
+    inputs = tf.ones(
+        dtype=tf.float32, shape=[self.batch_size, self.in_size])
+    prev_state = tf.ones(
+        dtype=tf.float32, shape=[self.batch_size, self.hidden_size])
 
     with self.assertRaisesRegexp(KeyError, "Invalid initializer keys.*"):
       snt.VanillaRNN(name="rnn",
@@ -143,19 +147,22 @@ class VanillaRNNTest(tf.test.TestCase):
     vanilla_rnn(inputs, prev_state)
     init = tf.global_variables_initializer()
 
-    with self.test_session() as sess:
-      sess.run(init)
-      w_v, b_v = sess.run([
-          vanilla_rnn.in_to_hidden_linear.w,
-          vanilla_rnn.hidden_to_hidden_linear.b,
-      ])
-      self.assertAllClose(w_v, np.ones([self.in_size, self.hidden_size]))
-      self.assertAllClose(b_v, np.ones([self.hidden_size]))
+    self.evaluate(init)
+    w_v, b_v = self.evaluate([
+        vanilla_rnn.in_to_hidden_linear.w,
+        vanilla_rnn.hidden_to_hidden_linear.b,
+    ])
+    self.assertAllClose(w_v, np.ones([self.in_size, self.hidden_size]))
+    self.assertAllClose(b_v, np.ones([self.hidden_size]))
 
   def testPartitioners(self):
-    inputs = tf.placeholder(tf.float32, shape=[self.batch_size, self.in_size])
-    prev_state = tf.placeholder(tf.float32,
-                                shape=[self.batch_size, self.hidden_size])
+    if tf.executing_eagerly():
+      self.skipTest("Partitioned variables are not supported in eager mode.")
+
+    inputs = tf.ones(
+        dtype=tf.float32, shape=[self.batch_size, self.in_size])
+    prev_state = tf.ones(
+        dtype=tf.float32, shape=[self.batch_size, self.hidden_size])
 
     with self.assertRaisesRegexp(KeyError, "Invalid partitioner keys.*"):
       snt.VanillaRNN(name="rnn",
@@ -196,9 +203,10 @@ class VanillaRNNTest(tf.test.TestCase):
                      variables.PartitionedVariable)
 
   def testRegularizers(self):
-    inputs = tf.placeholder(tf.float32, shape=[self.batch_size, self.in_size])
-    prev_state = tf.placeholder(tf.float32,
-                                shape=[self.batch_size, self.hidden_size])
+    inputs = tf.ones(
+        dtype=tf.float32, shape=[self.batch_size, self.in_size])
+    prev_state = tf.ones(
+        dtype=tf.float32, shape=[self.batch_size, self.hidden_size])
 
     with self.assertRaisesRegexp(KeyError, "Invalid regularizer keys.*"):
       snt.VanillaRNN(name="rnn",
@@ -229,6 +237,7 @@ class VanillaRNNTest(tf.test.TestCase):
     self.assertEqual(len(regularizers), 2)
 
 
+# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
 class DeepRNNTest(tf.test.TestCase, parameterized.TestCase):
 
   def testShape(self):
@@ -238,10 +247,13 @@ class DeepRNNTest(tf.test.TestCase, parameterized.TestCase):
     hidden1_size = 4
     hidden2_size = 5
 
-    inputs = tf.placeholder(tf.float32, shape=[batch_size, in_size])
-    prev_state0 = tf.placeholder(tf.float32, shape=[batch_size, in_size])
-    prev_state1 = tf.placeholder(tf.float32, shape=[batch_size, hidden1_size])
-    prev_state2 = tf.placeholder(tf.float32, shape=[batch_size, hidden2_size])
+    inputs = tf.ones(dtype=tf.float32, shape=[batch_size, in_size])
+    prev_state0 = tf.ones(
+        dtype=tf.float32, shape=[batch_size, in_size])
+    prev_state1 = tf.ones(
+        dtype=tf.float32, shape=[batch_size, hidden1_size])
+    prev_state2 = tf.ones(
+        dtype=tf.float32, shape=[batch_size, hidden2_size])
     prev_state = (prev_state0, prev_state1, prev_state2)
 
     # Test recurrent and non-recurrent cores
@@ -285,6 +297,42 @@ class DeepRNNTest(tf.test.TestCase, parameterized.TestCase):
     self.assertShapeEqual(np.ndarray((batch_size, hidden2_size)),
                           initial_state[2])
 
+  def testMultiDimShape(self):
+    batch_size = 3
+    num_layers = 2
+    input_shape = (8, 8)
+    input_channels = 4
+    output_channels = 5
+
+    input_shape = (batch_size,) + input_shape + (input_channels,)
+    output_shape = input_shape[:-1] + (output_channels,)
+
+    inputs = tf.ones(dtype=tf.float32, shape=input_shape)
+    prev_hidden = tf.ones(dtype=tf.float32, shape=output_shape)
+    prev_cell = tf.ones(dtype=tf.float32, shape=output_shape)
+    prev_state = [(prev_hidden, prev_cell) for _ in range(num_layers)]
+    def _create_lstm():
+      return snt.Conv2DLSTM(
+          input_shape=input_shape[1:], output_channels=output_channels,
+          kernel_shape=1)
+    deep_rnn = snt.DeepRNN([_create_lstm() for _ in range(num_layers)],
+                           name="deep_rnn", skip_connections=True)
+    output, next_state = deep_rnn(inputs, prev_state)
+
+    expected_output_shape = list(output_shape)
+    expected_output_shape[-1] *= num_layers
+
+    self.assertAllEqual(output.get_shape().as_list(), expected_output_shape)
+    self.assertAllEqual(deep_rnn.output_size.as_list(),
+                        expected_output_shape[1:])
+
+    next_state_shape = [
+        [state[0].get_shape().as_list(), state[1].get_shape().as_list()]
+        for state in next_state]
+    expected_next_state_shape = (
+        [[list(output_shape) for _ in range(2)]] * num_layers)
+    self.assertAllEqual(next_state_shape, expected_next_state_shape)
+
   def testIncompatibleOptions(self):
     in_size = 2
     hidden1_size = 4
@@ -327,9 +375,8 @@ class DeepRNNTest(tf.test.TestCase, parameterized.TestCase):
     y2, _ = tf.nn.dynamic_rnn(
         core2, xseq, initial_state=core2_h0, time_major=True)
 
-    with self.test_session() as sess:
-      sess.run(tf.global_variables_initializer())
-      sess.run([y1, y2])
+    self.evaluate(tf.global_variables_initializer())
+    self.evaluate([y1, y2])
 
   def testVariables(self):
     batch_size = 3
@@ -337,9 +384,11 @@ class DeepRNNTest(tf.test.TestCase, parameterized.TestCase):
     hidden1_size = 4
     hidden2_size = 5
     mod_name = "deep_rnn"
-    inputs = tf.placeholder(tf.float32, shape=[batch_size, in_size])
-    prev_state1 = tf.placeholder(tf.float32, shape=[batch_size, hidden1_size])
-    prev_state2 = tf.placeholder(tf.float32, shape=[batch_size, hidden1_size])
+    inputs = tf.ones(dtype=tf.float32, shape=[batch_size, in_size])
+    prev_state1 = tf.ones(
+        dtype=tf.float32, shape=[batch_size, hidden1_size])
+    prev_state2 = tf.ones(
+        dtype=tf.float32, shape=[batch_size, hidden1_size])
     prev_state = (prev_state1, prev_state2)
 
     cores = [snt.VanillaRNN(name="rnn1", hidden_size=hidden1_size),
@@ -374,45 +423,40 @@ class DeepRNNTest(tf.test.TestCase, parameterized.TestCase):
              snt.VanillaRNN(name="rnn2", hidden_size=hidden2_size)]
     deep_rnn = snt.DeepRNN(cores, name=mod_name,
                            skip_connections=skip_connections)
-    inputs = tf.placeholder(tf.float32, shape=[batch_size, in_size])
+    inputs = tf.constant(np.random.randn(batch_size, in_size), dtype=tf.float32)
     if create_initial_state:
       prev_state = deep_rnn.initial_state(batch_size, tf.float32)
     else:
-      prev_state1 = tf.placeholder(
-          tf.float32, shape=[batch_size, hidden1_size])
-      prev_state2 = tf.placeholder(
-          tf.float32, shape=[batch_size, hidden2_size])
+      prev_state1 = tf.constant(
+          np.random.randn(batch_size, hidden1_size), dtype=tf.float32)
+      prev_state2 = tf.constant(
+          np.random.randn(batch_size, hidden2_size), dtype=tf.float32)
       prev_state = (prev_state1, prev_state2)
 
     output, next_state = deep_rnn(inputs, prev_state)
-    with self.test_session() as sess:
-      # With random data, check the DeepRNN calculation matches the manual
-      # stacking version.
-      input_data = np.random.randn(batch_size, in_size)
-      feed_dict = {inputs: input_data}
-      if not create_initial_state:
-        feed_dict[prev_state1] = np.random.randn(batch_size, hidden1_size)
-        feed_dict[prev_state2] = np.random.randn(batch_size, hidden2_size)
 
-      tf.global_variables_initializer().run()
+    # With random data, check the DeepRNN calculation matches the manual
+    # stacking version.
 
-      outputs_value = sess.run([output, next_state[0], next_state[1]],
-                               feed_dict=feed_dict)
-      output_value, next_state1_value, next_state2_value = outputs_value
+    self.evaluate(tf.global_variables_initializer())
 
-      # Build manual computation graph
-      output1, next_state1 = cores[0](inputs, prev_state[0])
-      if skip_connections:
-        input2 = tf.concat([inputs, output1], 1)
-      else:
-        input2 = output1
-      output2, next_state2 = cores[1](input2, prev_state[1])
-      if skip_connections:
-        manual_output = tf.concat([output1, output2], 1)
-      else:
-        manual_output = output2
-      manual_outputs_value = sess.run([manual_output, next_state1, next_state2],
-                                      feed_dict=feed_dict)
+    outputs_value = self.evaluate([output, next_state[0], next_state[1]])
+    output_value, next_state1_value, next_state2_value = outputs_value
+
+    # Build manual computation graph
+    output1, next_state1 = cores[0](inputs, prev_state[0])
+    if skip_connections:
+      input2 = tf.concat([inputs, output1], 1)
+    else:
+      input2 = output1
+    output2, next_state2 = cores[1](input2, prev_state[1])
+    if skip_connections:
+      manual_output = tf.concat([output1, output2], 1)
+    else:
+      manual_output = output2
+    manual_outputs_value = self.evaluate(
+        [manual_output, next_state1, next_state2])
+
     manual_output_value = manual_outputs_value[0]
     manual_next_state1_value = manual_outputs_value[1]
     manual_next_state2_value = manual_outputs_value[2]
@@ -432,7 +476,8 @@ class DeepRNNTest(tf.test.TestCase, parameterized.TestCase):
 
     # Build DeepRNN of non-recurrent components.
     deep_rnn = snt.DeepRNN(cores, name="deeprnn", skip_connections=False)
-    input_ = tf.placeholder(tf.float32, shape=[batch_size, in_size])
+    input_data = np.random.randn(batch_size, in_size)
+    input_ = tf.constant(input_data, dtype=tf.float32)
     output, _ = deep_rnn(input_, ())
 
     # Build manual computation graph.
@@ -441,12 +486,9 @@ class DeepRNNTest(tf.test.TestCase, parameterized.TestCase):
     output2 = cores[1](input2)
     manual_output = output2
 
-    with self.test_session() as sess:
-      input_data = np.random.randn(batch_size, in_size)
-      feed_dict = {input_: input_data}
-      tf.global_variables_initializer().run()
-      output_value = sess.run([output], feed_dict=feed_dict)
-      manual_out_value = sess.run([manual_output], feed_dict=feed_dict)
+    self.evaluate(tf.global_variables_initializer())
+    output_value = self.evaluate(output)
+    manual_out_value = self.evaluate(manual_output)
 
     self.assertAllClose(output_value, manual_out_value)
 
@@ -489,10 +531,9 @@ class DeepRNNTest(tf.test.TestCase, parameterized.TestCase):
             core.initial_state(batch_size, trainable=trainable,
                                trainable_initializers=expected_initializer))
 
-    with self.test_session() as sess:
-      sess.run(tf.global_variables_initializer())
-      initial_state_value = sess.run(initial_state)
-      expected_initial_state_value = sess.run(expected_initial_state)
+    self.evaluate(tf.global_variables_initializer())
+    initial_state_value = self.evaluate(initial_state)
+    expected_initial_state_value = self.evaluate(expected_initial_state)
 
     for expected_value, actual_value in zip(expected_initial_state_value,
                                             initial_state_value):
@@ -514,19 +555,21 @@ class DeepRNNTest(tf.test.TestCase, parameterized.TestCase):
     initial_state_module = snt.Module(module_build)
     initial_state = initial_state_module()
 
-    with self.test_session() as sess:
-      sess.run(tf.global_variables_initializer())
-      initial_state_value = sess.run(initial_state)
-      self.assertEqual(initial_state_value[0][0][0].shape, (batch_size, 4))
-      self.assertEqual(initial_state_value[1][0][0].shape, (batch_size + 1, 4))
-      self.assertEqual(initial_state_value[0][0][1].shape, (batch_size, 4))
-      self.assertEqual(initial_state_value[1][0][1].shape, (batch_size + 1, 4))
-      self.assertEqual(initial_state_value[0][1][0].shape, (batch_size, 5))
-      self.assertEqual(initial_state_value[1][1][0].shape, (batch_size + 1, 5))
-      self.assertEqual(initial_state_value[0][1][1].shape, (batch_size, 5))
-      self.assertEqual(initial_state_value[1][1][1].shape, (batch_size + 1, 5))
+    self.evaluate(tf.global_variables_initializer())
+    initial_state_value = self.evaluate(initial_state)
+    self.assertEqual(initial_state_value[0][0][0].shape, (batch_size, 4))
+    self.assertEqual(initial_state_value[1][0][0].shape, (batch_size + 1, 4))
+    self.assertEqual(initial_state_value[0][0][1].shape, (batch_size, 4))
+    self.assertEqual(initial_state_value[1][0][1].shape, (batch_size + 1, 4))
+    self.assertEqual(initial_state_value[0][1][0].shape, (batch_size, 5))
+    self.assertEqual(initial_state_value[1][1][0].shape, (batch_size + 1, 5))
+    self.assertEqual(initial_state_value[0][1][1].shape, (batch_size, 5))
+    self.assertEqual(initial_state_value[1][1][1].shape, (batch_size + 1, 5))
 
   def testInitialStateNames(self):
+    if tf.executing_eagerly():
+      return self.skipTest("Tensor.name is meaningless in eager mode.")
+
     hidden_size_a = 3
     hidden_size_b = 4
     batch_size = 5
@@ -563,7 +606,7 @@ class DeepRNNTest(tf.test.TestCase, parameterized.TestCase):
     num_hidden = 5
     num_layers = 4
     final_hidden_size = 9
-    x_seq = tf.placeholder(shape=x_seq_shape, dtype=tf.float32)
+    x_seq = tf.constant(np.random.normal(size=x_seq_shape), dtype=tf.float32)
     cores = [snt.LSTM(num_hidden) for _ in xrange(num_layers - 1)]
     final_core = snt.LSTM(final_hidden_size)
     cores += [final_core]
@@ -577,10 +620,8 @@ class DeepRNNTest(tf.test.TestCase, parameterized.TestCase):
                                       initial_state=initial_state,
                                       dtype=tf.float32)
     initial_output = output_seq[0]
-    feed_dict = {x_seq: np.random.normal(size=x_seq_shape)}
-    with self.test_session() as sess:
-      sess.run(tf.global_variables_initializer())
-      initial_output_res = sess.run(initial_output, feed_dict=feed_dict)
+    self.evaluate(tf.global_variables_initializer())
+    initial_output_res = self.evaluate(initial_output)
     expected_shape = (batch_size, final_hidden_size)
     self.assertSequenceEqual(initial_output_res.shape, expected_shape)
 
@@ -615,8 +656,8 @@ class DeepRNNTest(tf.test.TestCase, parameterized.TestCase):
       unused_output_size = rnn.output_size
       self.assertTrue(mocked_logging_warning.called)
       first_call_args = mocked_logging_warning.call_args[0]
-      self.assertTrue("final core %s does not have the "
-                      ".output_size field" in first_call_args[0])
+      self.assertIn("final core %s does not have the "
+                    ".output_size field", first_call_args[0])
       self.assertEqual(first_call_args[2], 42)
 
   def testNoSizeButAlreadyConnected(self):
@@ -632,10 +673,11 @@ class DeepRNNTest(tf.test.TestCase, parameterized.TestCase):
       self.assertEqual(output_size, tf.TensorShape([42]))
       self.assertTrue(mocked_logging_warning.called)
       first_call_args = mocked_logging_warning.call_args[0]
-      self.assertTrue("DeepRNN has been connected into the graph, "
-                      "so inferred output size" in first_call_args[0])
+      self.assertIn("DeepRNN has been connected into the graph, "
+                    "so inferred output size", first_call_args[0])
 
 
+# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
 class ModelRNNTest(tf.test.TestCase):
 
   def setUp(self):
@@ -646,9 +688,9 @@ class ModelRNNTest(tf.test.TestCase):
 
   def testShape(self):
     model_rnn = snt.ModelRNN(self.model)
-    inputs = tf.random_normal([self.batch_size, 5])
-    prev_state = tf.placeholder(tf.float32,
-                                shape=[self.batch_size, self.hidden_size])
+    inputs = tf.ones([self.batch_size, 5])
+    prev_state = tf.ones(
+        dtype=tf.float32, shape=[self.batch_size, self.hidden_size])
 
     outputs, next_state = model_rnn(inputs, prev_state)
     batch_size_shape = tf.TensorShape(self.batch_size)
@@ -662,18 +704,14 @@ class ModelRNNTest(tf.test.TestCase):
   def testComputation(self):
     model_rnn = snt.ModelRNN(self.model)
     inputs = tf.random_normal([self.batch_size, 5])
-    prev_state = tf.placeholder(tf.float32,
-                                shape=[self.batch_size, self.hidden_size])
+    prev_state_data = np.random.randn(self.batch_size, self.hidden_size)
+    prev_state = tf.convert_to_tensor(prev_state_data)
 
     outputs, next_state = model_rnn(inputs, prev_state)
 
-    with self.test_session() as sess:
-      prev_state_data = np.random.randn(self.batch_size, self.hidden_size)
-      feed_dict = {prev_state: prev_state_data}
-      sess.run(tf.global_variables_initializer())
-
-      outputs_value = sess.run([outputs, next_state], feed_dict=feed_dict)
-      outputs_value, next_state_value = outputs_value
+    self.evaluate(tf.global_variables_initializer())
+    outputs_value = self.evaluate([outputs, next_state])
+    outputs_value, next_state_value = outputs_value
 
     self.assertAllClose(prev_state_data, outputs_value)
     self.assertAllClose(outputs_value, next_state_value)
@@ -683,6 +721,75 @@ class ModelRNNTest(tf.test.TestCase):
       snt.ModelRNN(tf.identity)
     with self.assertRaises(TypeError):
       snt.ModelRNN(np.array([42]))
+
+
+# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+class BidirectionalRNNTest(tf.test.TestCase):
+
+  toy_out = collections.namedtuple("toy_out", ("out_one", "out_two"))
+
+  class ToyRNN(snt.RNNCore):
+    """Basic fully connected vanilla RNN core."""
+
+    def __init__(self, hidden_size, name="toy_rnn"):
+      """Construct a Toy RNN core to generate Multimodal output/state."""
+      super(BidirectionalRNNTest.ToyRNN, self).__init__(name=name)
+      with self._enter_variable_scope():
+        self._wrapped_lstm = snt.LSTM(hidden_size)
+
+    def _build(self, input_, prev_state):
+      """Connects the ToyRNN module into the graph."""
+      output, state = self._wrapped_lstm(input_, prev_state)
+      return BidirectionalRNNTest.toy_out(output, output), state
+
+    def initial_state(self, batch_size, dtype=tf.float32, trainable=False,
+                      trainable_initializers=None, trainable_regularizers=None,
+                      name=None):
+      return self._wrapped_lstm.initial_state(batch_size)
+
+    @property
+    def state_size(self):
+      return self._wrapped_lstm.state_size
+
+    @property
+    def output_size(self):
+      return BidirectionalRNNTest.toy_out(self._wrapped_lstm.output_size,
+                                          self._wrapped_lstm.output_size)
+
+  def setUp(self):
+    self.seq_len = 8
+    self.feature_size = 12
+    self.batch_size = 5
+    self.hidden_size_forward = 10
+    self.hidden_size_backward = 20
+    self.forward_core = BidirectionalRNNTest.ToyRNN(
+        hidden_size=self.hidden_size_forward, name="forward_model")
+    self.backward_core = snt.LSTM(
+        hidden_size=self.hidden_size_backward, name="backward_model")
+
+  def testShape(self):
+    """Test forward backward models with multi-modal output/state."""
+    bidir_rnn = snt.BidirectionalRNN(
+        self.forward_core, self.backward_core)
+    seq = tf.zeros([self.seq_len, self.batch_size, self.feature_size])
+    state = bidir_rnn.initial_state(self.batch_size)
+    output = bidir_rnn(seq, state)
+    shape_forward = (self.seq_len, self.batch_size, self.hidden_size_forward)
+    shape_backward = (self.seq_len, self.batch_size, self.hidden_size_backward)
+    self.assertAllEqual(output["outputs"]["forward"].out_one.get_shape(),
+                        shape_forward)
+    self.assertAllEqual(output["outputs"]["forward"].out_two.get_shape(),
+                        shape_forward)
+    self.assertAllEqual(output["outputs"]["backward"].get_shape(),
+                        shape_backward)
+    self.assertAllEqual(output["state"]["forward"].cell.get_shape(),
+                        shape_forward)
+    self.assertAllEqual(output["state"]["forward"].hidden.get_shape(),
+                        shape_forward)
+    self.assertAllEqual(output["state"]["backward"].cell.get_shape(),
+                        shape_backward)
+    self.assertAllEqual(output["state"]["backward"].hidden.get_shape(),
+                        shape_backward)
 
 
 if __name__ == "__main__":

@@ -27,7 +27,7 @@ test_predictions = linear_regression_module(test_data)
 More usage examples:
 
  * Generative models
- * RNNs
+ * [RNNs](https://github.com/deepmind/sonnet/blob/master/sonnet/examples/)
 
 ## General Principles
 
@@ -214,7 +214,7 @@ different, unshared variables. This is not the case - only 4 variables (2 for
 each `Linear`) will be created, no matter how many times the MLP instance is
 connected into the graph. How this is works is a low level TF detail, and
 subject to change - see
-tf.variable_op_scope
+[tf.variable_op_scope](https://github.com/tensorflow/tensorflow/blob/master/tensorflow/python/ops/variable_scope.py)
 for details.
 
 ### Where should the submodules be declared?
@@ -287,9 +287,9 @@ which is completely disjoint from the `"wrong_module"` namespace.
 
 #### Usage
 
-Sonnet includes recurrent core modules (also called "cells"
+Sonnet includes recurrent core modules (also called ["cells"](https://www.tensorflow.org/api_docs/python/tf/nn/rnn_cell)
 in TensorFlow terminology), which perform one time step of computation. These
-are ready to be unrolled in time using TensorFlow's unrolling operations.
+are ready to be unrolled in time using TensorFlow's [unrolling operations](https://www.tensorflow.org/api_docs/python/tf/nn/dynamic_rnn).
 
 One example of an LSTM that is unrolled in time is the following:
 
@@ -309,14 +309,14 @@ The `batch_size` parameter passed to the `initial_state()` method can also be an
 `int32` Tensor.
 
 For a more comprehensive demonstration on the usage of recurrent modules, a
-fully-documented example of a deep LSTM with skip connections trained on the
-Shakespeare dataset
+fully-documented [example of a deep LSTM with skip connections trained on the
+Shakespeare dataset](https://github.com/deepmind/sonnet/blob/master/sonnet/examples/rnn_shakespeare.py)
 is available.
 
 #### Defining your own recurrent modules
 
 A recurrent module is any subclass of
-`snt.RNNCore`,
+[`snt.RNNCore`](https://github.com/deepmind/sonnet/blob/master/sonnet/python/modules/rnn_core.py),
 which inherits from `snt.AbstractModule` and has an interface compatible with
 `tf.nn.rnn_cell.RNNCell`. This allows us to use the variable sharing model from
 Sonnet whilst also using the cores inside TensorFlow's RNN Containers.
@@ -398,7 +398,7 @@ prefix for the (potentially multiple) variable name(s) which will be created.
 
 ### The Transposable interface
 Sonnet defines an interface for modules supporting _transposition_, called
-`snt.Transposable`.
+[`snt.Transposable`](https://github.com/deepmind/sonnet/blob/master/sonnet/docs/sonnet.md?#Transposable).
 Transposition is a flexible concept (e.g. not necessarily
 related to matrix transposition as defined in algebra), and in this context
 it entails the definition of a new module with attributes which are somehow
@@ -419,14 +419,14 @@ When implementing a transposable module, special care is required to ensure that
 parameters needed to instantiate the module are provided as functions whose
 evaluation is _deferred_ to graph construction time. This mechanism allows for
 transposed modules to be instantiated _before_ the original module is connected
-to the graph. An example of this behavior can be found in `snt.Linear`,
+to the graph. An example of this behavior can be found in [`snt.Linear`](https://github.com/deepmind/sonnet/blob/master/sonnet/python/modules/basic.py?l=272),
 where the `output_size` argument of the transposed module is defined as a
 `lambda` returning the `input_shape` property of the original module;
 upon evaluation `input_shape` will raise an error unless the module has not been
 connected to the graph, but this is not an issue since the `lambda` is not
 called until the transposed module is connected to the graph.
 
-## Variable reuse with `@snt.reuse_variables` (**experimental**)
+## Variable reuse with `@snt.reuse_variables`
 
 Some use cases require a `tf.VariableScope` to be shared across multiple
 methods, which isn't possible with `snt.AbstractModule`.
@@ -544,7 +544,7 @@ instantiate modules wrapping user-provided functions.
 The `snt.Module` class constructor takes a callable and returns a Sonnet module.
 The provided function is invoked when the module is called, thus specifying how
 new nodes are added to the computational graph and how to compute output Tensors
-from input Tensors. Please refer to the module documentation
+from input Tensors. Please refer to the module [documentation](https://github.com/deepmind/sonnet/blob/master/sonnet/docs/sonnet.md?#Module)
 for more details and examples.
 
 ## FAQ
@@ -646,7 +646,8 @@ desirable to implement it with a Module instead of an Op.
 
 Aside from variable sharing, it may be convenient to use Sonnet Modules in cases
 where we wish to attach configuration parameters to an op. An example of this is
-the content addressing
+the [content addressing](
+https://github.com/deepmind/dnc/blob/d3d94b3b1f1efc282481910054f82047caf37f65/dnc/addressing.py#L58)
 modules in the Differentiable Neural Computer.
 These modules receive a number of configuration parameters
 (size of each word in memory, number of read heads) and some function of these

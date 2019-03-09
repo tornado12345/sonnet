@@ -19,6 +19,9 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import functools
+import operator
+
 # Dependency imports
 from absl.testing import parameterized
 import numpy as np
@@ -28,33 +31,45 @@ import tensorflow as tf
 from tensorflow.python.ops import variables
 
 
+def _get_layer_norm_stats(data, axis):
+  """Returns mean and variances calculated over the given axes of the data."""
+
+  if axis is None:
+    axis = list(range(1, data.ndim))
+
+  # convert a scalar axis into a singleton list so code below can assume a list
+  if isinstance(axis, int):
+    axis = [axis]
+
+  # Transpose to put all the normalized dimensions at the end. Well done tharley
+  # for the one-liner. For 5D data, and example axis [1, 3] produces transpose
+  # arg of [0, 2, 4, 1, 3] which puts all the normalization axis at the end,
+  # suitable for flattening down to calculate statistics.
+  transposed_data = np.transpose(
+      data,
+      sorted(set(range(data.ndim)) - set(axis)) + axis)
+
+  # Combine the sizes of all the (now trailing) normalized_dimensions
+  normalized_dims_total_size = functools.reduce(
+      operator.mul, (data.shape[ax] for ax in axis))
+
+  # Do the reshape - all the non-normalized dimensions are combined by "-1"
+  reshaped = np.reshape(transposed_data, [-1, normalized_dims_total_size])
+
+  # Return stats - should be very close to standard normal.
+  return {
+      "mean": np.mean(reshaped, axis=1),
+      "std": np.std(reshaped, axis=1),
+  }
+
+
 class LayerNormTest(parameterized.TestCase, tf.test.TestCase):
-
-  def testConstruct(self):
-    inputs = tf.placeholder(tf.float32, shape=[None, 64])
-
-    layer_norm1 = snt.LayerNorm()
-    layer_norm1(inputs)
-
-    err = (r"Layer normalization expects inputs of rank 2. "
-           r"Got inputs of rank \d.")
-    with self.assertRaisesRegexp(snt.Error, err):
-      malformed_inputs = tf.placeholder(tf.float32, shape=[None, 64, 1])
-      layer_norm2 = snt.LayerNorm()
-      layer_norm2(malformed_inputs)
-
-  def testFloat16Error(self):
-    inputs = tf.placeholder(tf.float16, shape=[None, 64])
-    layer_norm = snt.LayerNorm()
-
-    err = (r"LayerNorm does not support `tf\.float16`, insufficient precision "
-           "for calculating sufficient statistics.")
-    with self.assertRaisesRegexp(snt.NotSupportedError, err):
-      layer_norm(inputs)
 
   @parameterized.named_parameters(
       ("Float32", tf.float32),
       ("Float64", tf.float64),
+      ("Float16", tf.float16),
+      ("BFloat16", tf.bfloat16),
   )
   def testDataType(self, dtype):
     inputs = tf.placeholder(dtype, shape=[None, 64])
@@ -62,8 +77,10 @@ class LayerNormTest(parameterized.TestCase, tf.test.TestCase):
     output = layer_norm(inputs)
 
     self.assertEqual(dtype, output.dtype)
-    self.assertEqual(dtype, layer_norm.gamma.dtype.base_dtype)
-    self.assertEqual(dtype, layer_norm.beta.dtype.base_dtype)
+    # Variables are stored in float32 for lower precision activations.
+    expected_dtype = tf.float32 if dtype in [tf.float16, tf.bfloat16] else dtype
+    self.assertEqual(expected_dtype, layer_norm.gamma.dtype.base_dtype)
+    self.assertEqual(expected_dtype, layer_norm.beta.dtype.base_dtype)
 
   def testNormalization(self):
     """Check that inputs are approximately centered and scaled."""
@@ -91,7 +108,7 @@ class LayerNormTest(parameterized.TestCase, tf.test.TestCase):
     ln(inputs1)
     ln(inputs2)
 
-    self.assertEqual(len(tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)), 2)
+    self.assertLen(tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES), 2)
 
   def testInvalidInitializerParameters(self):
     with self.assertRaisesRegexp(KeyError, "Invalid initializer keys.*"):
@@ -167,6 +184,67 @@ class LayerNormTest(parameterized.TestCase, tf.test.TestCase):
 
     self.assertEqual(type(ln.gamma), variables.PartitionedVariable)
     self.assertEqual(type(ln.beta), variables.PartitionedVariable)
+
+  @parameterized.parameters(
+      # Default, sums over all dimensions except batch:
+      {"axis": None, "input_shape": [2, 3]},
+      {"axis": None, "input_shape": [4, 5, 6]},
+      {"axis": None, "input_shape": [12, 13, 14, 15]},
+      # Specify a single axis to sum over:
+      {"axis": [1], "input_shape": [5, 6, 7]},
+      {"axis": 1, "input_shape": [5, 6, 7]},
+      # Sum over all except final dimension - i.e. Instance Norm.
+      {"axis": [1, 2], "input_shape": [10, 11, 12, 14]},
+      # Sum over non-contiguous dimensions.
+      {"axis": [1, 3], "input_shape": [3, 4, 5, 6, 7]},
+      )
+  def testAxesDefault(self, axis, input_shape):
+
+    inputs = tf.constant(np.random.rand(*input_shape))
+    ln = snt.LayerNorm(axis=axis, offset=False, scale=False)
+    output = ln(inputs)
+
+    init = tf.global_variables_initializer()
+    with self.test_session() as session:
+      session.run(init)
+      output_np = session.run(output)
+
+    statistics = _get_layer_norm_stats(output_np, axis=axis)
+    self.assertAllClose(statistics["mean"],
+                        np.zeros_like(statistics["mean"]),
+                        atol=2e-3)
+    self.assertAllClose(statistics["std"],
+                        np.ones_like(statistics["std"]),
+                        atol=2e-3)
+
+  @parameterized.parameters(
+      {"axis": True},
+      {"axis": False},
+      {"axis": 4.0},
+      {"axis": [2, "invalid"]})
+  def testInvalidAxes(self, axis):
+    msg = "axis should be an int or an iterable of ints"
+    with self.assertRaisesRegexp(ValueError, msg):
+      snt.LayerNorm(axis=axis)
+
+  @parameterized.parameters(
+      {"scale": True, "offset": True},
+      {"scale": True, "offset": False},
+      {"scale": False, "offset": True},
+      {"scale": False, "offset": False})
+  def testScaleAndOffset(self, scale, offset):
+    inputs = tf.random_uniform([2, 4, 6])
+    module = snt.LayerNorm(scale=scale, offset=offset)
+    _ = module(inputs)
+    variables_dict = {v.name: v for v in module.get_variables()}
+    if scale:
+      self.assertEqual(variables_dict["layer_norm/gamma:0"].shape, (6,))
+    else:
+      self.assertNotIn("layer_norm/gamma:0", variables_dict)
+    if offset:
+      self.assertEqual(variables_dict["layer_norm/beta:0"].shape, (6,))
+    else:
+      self.assertNotIn("layer_norm/beta:0", variables_dict)
 
 
 if __name__ == "__main__":

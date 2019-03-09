@@ -51,8 +51,6 @@ from sonnet.python.modules import rnn_core
 from sonnet.python.modules import util
 import tensorflow as tf
 
-from tensorflow.python.ops import array_ops
-
 
 LSTMState = collections.namedtuple("LSTMState", ("hidden", "cell"))
 
@@ -258,7 +256,7 @@ class LSTM(rnn_core.RNNCore):
     gates += self._b
 
     # i = input_gate, j = next_input, f = forget_gate, o = output_gate
-    i, j, f, o = array_ops.split(value=gates, num_or_size_splits=4, axis=1)
+    i, j, f, o = tf.split(value=gates, num_or_size_splits=4, axis=1)
 
     if self._use_peepholes:  # diagonal connections
       self._create_peephole_variables(inputs.dtype)
@@ -482,7 +480,7 @@ class ZoneoutWrapper(rnn_core.RNNCore):
   def _build(self, inputs, prev_state):
     output, next_state = self._core(inputs, prev_state)
 
-    def apply_zoneout(keep_prob, next_s, prev_s):
+    def apply_zoneout(keep_prob, next_s, prev_s):  # pylint: disable=missing-docstring
       if keep_prob is None:
         return next_s
       if self._is_training:
@@ -628,9 +626,6 @@ class BatchNormLSTM(rnn_core.RNNCore):
   BETA_C = "beta_c"  # (batch norm) bias for cell -> output
   POSSIBLE_INITIALIZER_KEYS = {W_GATES, B_GATES, W_F_DIAG, W_I_DIAG, W_O_DIAG,
                                GAMMA_H, GAMMA_X, GAMMA_C, BETA_C}
-  # Keep old name for backwards compatibility
-
-  POSSIBLE_KEYS = POSSIBLE_INITIALIZER_KEYS
 
   def __init__(self,
                hidden_size,
@@ -899,7 +894,7 @@ class BatchNormLSTM(rnn_core.RNNCore):
     gates += self._b
 
     # i = input_gate, j = next_input, f = forget_gate, o = output_gate
-    i, j, f, o = array_ops.split(value=gates, num_or_size_splits=4, axis=1)
+    i, j, f, o = tf.split(value=gates, num_or_size_splits=4, axis=1)
 
     if self._use_peepholes:  # diagonal connections
       self._create_peephole_variables(inputs.dtype)
@@ -1236,10 +1231,12 @@ class ConvLSTM(rnn_core.RNNCore):
                rate=1,
                padding=conv.SAME,
                use_bias=True,
+               legacy_bias_behaviour=True,
                forget_bias=1.0,
                initializers=None,
                partitioners=None,
                regularizers=None,
+               use_layer_norm=False,
                custom_getter=None,
                name="conv_lstm"):
     """Construct ConvLSTM.
@@ -1248,16 +1245,19 @@ class ConvLSTM(rnn_core.RNNCore):
       conv_ndims: Convolution dimensionality (1, 2 or 3).
       input_shape: Shape of the input as an iterable, excluding the batch size.
       output_channels: Number of output channels of the conv LSTM.
-      kernel_shape: Sequence of kernel sizes (of size 2), or integer that is
-          used to define kernel size in all dimensions.
-      stride: Sequence of kernel strides (of size 2), or integer that is used to
-          define stride in all dimensions.
+      kernel_shape: Sequence of kernel sizes (of size conv_ndims), or integer
+          that is used to define kernel size in all dimensions.
+      stride: Sequence of kernel strides (of size conv_ndims), or integer that
+          is used to define stride in all dimensions.
       rate: Sequence of dilation rates (of size conv_ndims), or integer that is
           used to define dilation rate in all dimensions. 1 corresponds to a
           standard convolution, while rate > 1 corresponds to a dilated
           convolution. Cannot be > 1 if any of stride is also > 1.
       padding: Padding algorithm, either `snt.SAME` or `snt.VALID`.
       use_bias: Use bias in convolutions.
+      legacy_bias_behaviour: If True, bias is applied to both input and hidden
+        convolutions, creating a redundant bias variable. If False, bias is only
+        applied to input convolution, removing the redundancy.
       forget_bias: Forget bias.
       initializers: Dict containing ops to initialize the convolutional weights.
       partitioners: Optional dict containing partitioners to partition
@@ -1265,6 +1265,9 @@ class ConvLSTM(rnn_core.RNNCore):
         used.
       regularizers: Optional dict containing regularizers for the convolutional
         weights and biases. As a default, no regularizers are used.
+      use_layer_norm: Boolean that indicates whether to apply layer
+        normalization. This is applied across the entire layer, normalizing
+        over all non-batch dimensions.
       custom_getter: Callable that takes as a first argument the true getter,
         and allows overwriting the internal get_variable method. See the
         `tf.get_variable` documentation for more details.
@@ -1290,28 +1293,50 @@ class ConvLSTM(rnn_core.RNNCore):
     self._rate = rate
     self._padding = padding
     self._use_bias = use_bias
+    self._legacy_bias_behaviour = legacy_bias_behaviour
     self._forget_bias = forget_bias
     self._initializers = initializers
     self._partitioners = partitioners
     self._regularizers = regularizers
+    self._use_layer_norm = use_layer_norm
 
     self._total_output_channels = output_channels
     if self._stride != 1:
       self._total_output_channels //= self._stride * self._stride
 
-    self._convolutions = collections.defaultdict(self._new_convolution)
+    self._convolutions = dict()
 
-  def _new_convolution(self):
+
+    if self._use_bias and self._legacy_bias_behaviour:
+      tf.logging.warning(
+          "ConvLSTM will create redundant bias variables for input and hidden "
+          "convolutions. To avoid this, invoke the constructor with option "
+          "`legacy_bias_behaviour=False`. In future, this will be the default.")
+
+  def _new_convolution(self, use_bias):
+    """Returns new convolution.
+
+    Args:
+      use_bias: Use bias in convolutions. If False, clean_dict removes bias
+        entries from initializers, partitioners and regularizers passed to
+        the constructor of the convolution.
+    """
+    def clean_dict(input_dict):
+      if input_dict and not use_bias:
+        cleaned_dict = input_dict.copy()
+        cleaned_dict.pop("b", None)
+        return cleaned_dict
+      return input_dict
     return self._conv_class(
         output_channels=4*self._output_channels,
         kernel_shape=self._kernel_shape,
         stride=self._stride,
         rate=self._rate,
         padding=self._padding,
-        use_bias=self._use_bias,
-        initializers=self._initializers,
-        partitioners=self._partitioners,
-        regularizers=self._regularizers,
+        use_bias=use_bias,
+        initializers=clean_dict(self._initializers),
+        partitioners=clean_dict(self._partitioners),
+        regularizers=clean_dict(self._regularizers),
         name="conv")
 
   @property
@@ -1333,9 +1358,27 @@ class ConvLSTM(rnn_core.RNNCore):
 
   def _build(self, inputs, state):
     hidden, cell = state
+    if "input" not in self._convolutions:
+      self._convolutions["input"] = self._new_convolution(self._use_bias)
+    if "hidden" not in self._convolutions:
+      if self._legacy_bias_behaviour:
+        self._convolutions["hidden"] = self._new_convolution(self._use_bias)
+      else:
+        # Do not apply bias a second time
+        self._convolutions["hidden"] = self._new_convolution(use_bias=False)
     input_conv = self._convolutions["input"]
     hidden_conv = self._convolutions["hidden"]
     next_hidden = input_conv(inputs) + hidden_conv(hidden)
+
+    if self._use_layer_norm:
+      # Normalize over all non-batch dimensions.
+      # Temporarily flatten the spatial and channel dimensions together.
+      flatten = basic.BatchFlatten()
+      unflatten = basic.BatchReshape(next_hidden.get_shape().as_list()[1:])
+      next_hidden = flatten(next_hidden)
+      next_hidden = layer_norm.LayerNorm()(next_hidden)
+      next_hidden = unflatten(next_hidden)
+
     gates = tf.split(value=next_hidden, num_or_size_splits=4,
                      axis=self._conv_ndims+1)
 
@@ -1344,6 +1387,11 @@ class ConvLSTM(rnn_core.RNNCore):
     next_cell += tf.sigmoid(input_gate) * tf.tanh(next_input)
     output = tf.tanh(next_cell) * tf.sigmoid(output_gate)
     return output, (output, next_cell)
+
+  @property
+  def use_layer_norm(self):
+    """Boolean indicating whether layer norm is enabled."""
+    return self._use_layer_norm
 
 
 class Conv1DLSTM(ConvLSTM):
@@ -1392,9 +1440,6 @@ class GRU(rnn_core.RNNCore):
   UH = "uh"  # weight for prev_state -> candidate activation
   BH = "bh"  # bias for candidate activation
   POSSIBLE_INITIALIZER_KEYS = {WZ, UZ, BZ, WR, UR, BR, WH, UH, BH}
-  # Keep old name for backwards compatibility
-
-  POSSIBLE_KEYS = POSSIBLE_INITIALIZER_KEYS
 
   def __init__(self, hidden_size, initializers=None, partitioners=None,
                regularizers=None, custom_getter=None, name="gru"):
@@ -1716,3 +1761,12 @@ def highway_core_with_recurrent_dropout(
 
   core = HighwayCore(hidden_size, num_layers, **kwargs)
   return RecurrentDropoutWrapper(core, keep_prob), core
+
+
+class LSTMBlockCell(rnn_core.RNNCellWrapper):
+  """Wraps the TensorFlow LSTMBlockCell as a Sonnet RNNCore."""
+
+  @rnn_core.with_doc(tf.contrib.rnn.LSTMBlockCell.__init__)
+  def __init__(self, *args, **kwargs):
+    super(LSTMBlockCell, self).__init__(tf.contrib.rnn.LSTMBlockCell,
+                                        *args, **kwargs)

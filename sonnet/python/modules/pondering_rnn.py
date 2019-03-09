@@ -37,7 +37,14 @@ def _nested_add(nested_a, nested_b):
 
 def _nested_unary_mul(nested_a, p):
   """Multiply `Tensors` in arbitrarily nested `Tensor` `nested_a` with `p`."""
-  return nest.map(lambda a: p * a, nested_a)
+  def mul_with_broadcast(tensor):
+    ndims = tensor.shape.ndims
+    if ndims != 2:
+      p_reshaped = tf.reshape(p, [-1] + [1] * (ndims - 1))
+      return p_reshaped * tensor
+    else:
+      return p * tensor
+  return nest.map(mul_with_broadcast, nested_a)
 
 
 def _nested_zeros_like(nested_a):
@@ -64,7 +71,7 @@ class ACTCore(rnn_core.RNNCore):
   """
 
   def __init__(self, core, output_size, threshold, get_state_for_halting,
-               name="act_core"):
+               max_steps=0, name="act_core"):
     """Constructor.
 
     Args:
@@ -75,6 +82,8 @@ class ACTCore(rnn_core.RNNCore):
           pondering.
       get_state_for_halting: A callable that can take the `core` state and
           return the input to the halting function.
+      max_steps: Integer >= 0, that controls the maximum number of ponder steps.
+          If equal to 0, then this disables control.
       name: A string. The name of this module.
 
     Raises:
@@ -87,6 +96,7 @@ class ACTCore(rnn_core.RNNCore):
     self._output_size = output_size
     self._threshold = threshold
     self._get_state_for_halting = get_state_for_halting
+    self._max_steps = max_steps
 
     if not isinstance(self._core.output_size, tf.TensorShape):
       raise ValueError("Output of core should be single Tensor.")
@@ -138,6 +148,9 @@ class ACTCore(rnn_core.RNNCore):
     halting = tf.sigmoid(halting_input, name="halting")
     next_cumul_halting_raw = cumul_halting + halting
     over_threshold = next_cumul_halting_raw > self._threshold
+    if self._max_steps > 0:
+      at_max_steps = tf.greater_equal(next_iteration, self._max_steps)
+      over_threshold = tf.logical_or(over_threshold, at_max_steps)
     next_cumul_halting = tf.where(over_threshold, all_ones,
                                   next_cumul_halting_raw)
     next_remainder = tf.where(over_threshold, remainder,

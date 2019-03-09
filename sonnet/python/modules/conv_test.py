@@ -186,8 +186,29 @@ class SharedConvTest(parameterized.TestCase, tf.test.TestCase):
       "output_channels": 1,
       "kernel_shape": 3,
   }
+  CONV_1D_MASKED_KWARGS = {
+      "output_channels": 1,
+      "kernel_shape": 3,
+      "mask": np.zeros((3, 10, 1), dtype=np.float64),
+  }
+  CONV_1D_CAUSAL_KWARGS = {
+      "output_channels": 1,
+      "kernel_shape": 3,
+      "padding": snt.CAUSAL,
+  }
+  SEPARABLE_CONV_1D_KWARGS = {
+      "output_channels": 10,
+      "channel_multiplier": 1,
+      "kernel_shape": 3,
+      "rate": (2,),
+  }
   CONV_2D_KWARGS = CONV_1D_KWARGS
   CONV_3D_KWARGS = CONV_1D_KWARGS
+  CONV_3D_MIXED_PADDING_KWARGS = {
+      "output_channels": 1,
+      "kernel_shape": 3,
+      "padding": [snt.CAUSAL, snt.SAME, snt.FULL]
+  }
   DEPTHWISE_CONV_2D_KWARGS = {
       "channel_multiplier": 1,
       "kernel_shape": 3,
@@ -196,6 +217,7 @@ class SharedConvTest(parameterized.TestCase, tf.test.TestCase):
       "output_channels": 10,
       "channel_multiplier": 1,
       "kernel_shape": 3,
+      "rate": (2, 1),
   }
   IN_PLANE_CONV_2D_KWARGS = {
       "kernel_shape": 3,
@@ -218,13 +240,17 @@ class SharedConvTest(parameterized.TestCase, tf.test.TestCase):
 
   modules = [
       (snt.Conv1D, 1, CONV_1D_KWARGS),
+      (snt.Conv1D, 1, CONV_1D_MASKED_KWARGS),
+      (snt.Conv1D, 1, CONV_1D_CAUSAL_KWARGS),
       (snt.Conv2D, 2, CONV_2D_KWARGS),
       (snt.Conv3D, 3, CONV_3D_KWARGS),
+      (snt.Conv3D, 3, CONV_3D_MIXED_PADDING_KWARGS),
       (snt.Conv1DTranspose, 1, CONV_1D_TRANSPOSE_KWARGS),
       (snt.Conv2DTranspose, 2, CONV_2D_TRANSPOSE_KWARGS),
       (snt.Conv3DTranspose, 3, CONV_3D_TRANSPOSE_KWARGS),
       (snt.DepthwiseConv2D, 2, DEPTHWISE_CONV_2D_KWARGS),
       (snt.InPlaneConv2D, 2, IN_PLANE_CONV_2D_KWARGS),
+      (snt.SeparableConv1D, 1, SEPARABLE_CONV_1D_KWARGS),
       (snt.SeparableConv2D, 2, SEPARABLE_CONV_2D_KWARGS),
   ]
 
@@ -236,6 +262,11 @@ class SharedConvTest(parameterized.TestCase, tf.test.TestCase):
     partitioners = {
         key: tf.variable_axis_size_partitioner(10) for key in keys
     }
+
+    if "mask" in module_kwargs:
+      np_dtype = inputs.dtype.as_numpy_dtype()
+      module_kwargs["mask"] = module_kwargs["mask"].astype(np_dtype)
+
     convolution = module(partitioners=partitioners, **module_kwargs)
     convolution(inputs)
 
@@ -243,9 +274,12 @@ class SharedConvTest(parameterized.TestCase, tf.test.TestCase):
       self.assertEqual(type(getattr(convolution, key)),
                        variables.PartitionedVariable)
 
-    if isinstance(conv, snt.Transposable):
+    try:
       convolution_t = convolution.transpose()
-      self.assertEqual(convolution_t.partitioners, convolution.partitioners)
+    except (AttributeError, snt.NotSupportedError):
+      return
+
+    self.assertEqual(convolution_t.partitioners, convolution.partitioners)
 
   @parameterized.parameters(*itertools.product(modules,
                                                (True, False),
@@ -258,6 +292,10 @@ class SharedConvTest(parameterized.TestCase, tf.test.TestCase):
 
     input_shape = (10,) * (num_input_dims + 2)
     inputs = tf.placeholder(dtype, input_shape)
+
+    if "mask" in module_kwargs:
+      np_dtype = dtype.as_numpy_dtype()
+      module_kwargs["mask"] = module_kwargs["mask"].astype(np_dtype)
 
     with tf.variable_scope("scope"):
       conv_mod = module(name=mod_name, use_bias=use_bias, **module_kwargs)
@@ -338,6 +376,10 @@ class SharedConvTest(parameterized.TestCase, tf.test.TestCase):
 
     inputs = tf.placeholder(tf.float32, (10,) * (num_input_dims + 2))
 
+    if "mask" in module_kwargs:
+      np_dtype = inputs.dtype.as_numpy_dtype()
+      module_kwargs["mask"] = module_kwargs["mask"].astype(np_dtype)
+
     conv_mod1 = module(**module_kwargs)
     out1 = conv_mod1(inputs)
 
@@ -353,21 +395,37 @@ class SharedConvTest(parameterized.TestCase, tf.test.TestCase):
     self.assertEqual([None] * num_variables, grads2)
 
     # Check that the transpose, if present, also adopts the custom getter.
-    if hasattr(conv_mod2, "transpose"):
+    try:
       conv_mod2_transpose = conv_mod2.transpose()
-      inputs_transpose = tf.placeholder(tf.float32, out2.get_shape())
-      out3 = conv_mod2_transpose(inputs_transpose)
-      grads3 = tf.gradients(out3, list(conv_mod2_transpose.get_variables()))
-      self.assertEqual([None] * num_variables, grads3)
+    except (AttributeError, snt.NotSupportedError):
+      return
+    inputs_transpose = tf.placeholder(tf.float32, out2.get_shape())
+    out3 = conv_mod2_transpose(inputs_transpose)
+    grads3 = tf.gradients(out3, list(conv_mod2_transpose.get_variables()))
+    self.assertEqual([None] * num_variables, grads3)
+
+
+# These functions compute the expected output shape of a convolution of each
+# padding type, for a given input shape and kernel size.
+_PADDINGS_EXPECTED_SHAPE_TRANSFORMS = {
+    snt.SAME: lambda in_length, kernel_size: in_length,
+    snt.VALID: lambda in_length, kernel_size: in_length - kernel_size + 1,
+    snt.FULL: lambda in_length, kernel_size: in_length + kernel_size - 1,
+    snt.CAUSAL: lambda in_length, kernel_size: in_length,
+    snt.REVERSE_CAUSAL: lambda in_length, kernel_size: in_length,
+}
 
 
 class Conv2DTest(parameterized.TestCase, tf.test.TestCase):
 
-  @parameterized.named_parameters(
-      ("WithBias", True),
-      ("WithoutBias", False))
-  def testShapesSame(self, use_bias):
-    """The generated shapes are correct with SAME padding."""
+  @parameterized.parameters(*itertools.product(
+      [True, False],  # use_bias
+      conv.SUPPORTED_2D_DATA_FORMATS,  # data_format
+      conv.ALLOWED_PADDINGS,  # padding_height
+      conv.ALLOWED_PADDINGS,  # padding_width
+  ))
+  def testShapes(self, use_bias, data_format, padding_height, padding_width):
+    """The generated shapes are correct with different paddings."""
 
     batch_size = random.randint(1, 100)
     in_height = random.randint(10, 288)
@@ -377,23 +435,34 @@ class Conv2DTest(parameterized.TestCase, tf.test.TestCase):
     kernel_shape_h = random.randint(1, 11)
     kernel_shape_w = random.randint(1, 11)
 
-    inputs = tf.placeholder(
-        tf.float32,
-        shape=[batch_size, in_height, in_width, in_channels])
+    if data_format == conv.DATA_FORMAT_NHWC:
+      inputs = tf.placeholder(
+          tf.float32, shape=[batch_size, in_height, in_width, in_channels])
+    else:  # NCHW
+      inputs = tf.placeholder(
+          tf.float32, shape=[batch_size, in_channels, in_height, in_width])
 
     conv1 = snt.Conv2D(
         name="conv1",
         output_channels=out_channels,
         kernel_shape=[kernel_shape_h, kernel_shape_w],
-        padding=snt.SAME,
+        padding=[padding_height, padding_width],
+        data_format=data_format,
         stride=1,
         use_bias=use_bias)
 
     output = conv1(inputs)
+    expected_out_height = _PADDINGS_EXPECTED_SHAPE_TRANSFORMS[padding_height](
+        in_height, kernel_shape_h)
+    expected_out_width = _PADDINGS_EXPECTED_SHAPE_TRANSFORMS[padding_width](
+        in_width, kernel_shape_w)
 
-    self.assertTrue(
-        output.get_shape().is_compatible_with(
-            [batch_size, in_height, in_width, out_channels]))
+    if data_format == conv.DATA_FORMAT_NHWC:
+      self.assertTrue(output.get_shape().is_compatible_with(
+          [batch_size, expected_out_height, expected_out_width, out_channels]))
+    else:  # NCHW
+      self.assertTrue(output.get_shape().is_compatible_with(
+          [batch_size, out_channels, expected_out_height, expected_out_width]))
 
     self.assertTrue(
         conv1.w.get_shape().is_compatible_with(
@@ -630,61 +699,68 @@ class Conv2DTest(parameterized.TestCase, tf.test.TestCase):
     if use_bias:
       self.assertRegexpMatches(graph_regularizers[1].name, ".*l1_regularizer.*")
 
-  @parameterized.named_parameters(
-      ("WithBias", True),
-      ("WithoutBias", False))
-  def testComputationSame(self, use_bias):
-    """Run through for something with a known answer using SAME padding."""
+  @parameterized.parameters(*itertools.product(
+      [True, False],  # use_bias
+      # (padding_h, padding_w, expected_out):
+      [(snt.VALID, snt.VALID, [[9, 9, 9],
+                               [9, 9, 9],
+                               [9, 9, 9]]),
+       (snt.SAME, snt.SAME, [[4, 6, 6, 6, 4],
+                             [6, 9, 9, 9, 6],
+                             [6, 9, 9, 9, 6],
+                             [6, 9, 9, 9, 6],
+                             [4, 6, 6, 6, 4]]),
+       (snt.CAUSAL, snt.CAUSAL, [[1, 2, 3, 3, 3],
+                                 [2, 4, 6, 6, 6],
+                                 [3, 6, 9, 9, 9],
+                                 [3, 6, 9, 9, 9],
+                                 [3, 6, 9, 9, 9]]),
+       (snt.REVERSE_CAUSAL, snt.REVERSE_CAUSAL, [[9, 9, 9, 6, 3],
+                                                 [9, 9, 9, 6, 3],
+                                                 [9, 9, 9, 6, 3],
+                                                 [6, 6, 6, 4, 2],
+                                                 [3, 3, 3, 2, 1]]),
+       (snt.FULL, snt.FULL, [[1, 2, 3, 3, 3, 2, 1],
+                             [2, 4, 6, 6, 6, 4, 2],
+                             [3, 6, 9, 9, 9, 6, 3],
+                             [3, 6, 9, 9, 9, 6, 3],
+                             [3, 6, 9, 9, 9, 6, 3],
+                             [2, 4, 6, 6, 6, 4, 2],
+                             [1, 2, 3, 3, 3, 2, 1]]),
+       (snt.CAUSAL, snt.FULL, [[1, 2, 3, 3, 3, 2, 1],
+                               [2, 4, 6, 6, 6, 4, 2],
+                               [3, 6, 9, 9, 9, 6, 3],
+                               [3, 6, 9, 9, 9, 6, 3],
+                               [3, 6, 9, 9, 9, 6, 3]]),
+       (snt.SAME, snt.REVERSE_CAUSAL, [[6, 6, 6, 4, 2],
+                                       [9, 9, 9, 6, 3],
+                                       [9, 9, 9, 6, 3],
+                                       [9, 9, 9, 6, 3],
+                                       [6, 6, 6, 4, 2]])],
+  ))
+  def testComputation(self, use_bias, padding_and_expected_out):
+    """Run through for something with a known answer using different args."""
+    padding_h, padding_w, expected_out = padding_and_expected_out
     conv1 = snt.Conv2D(
         output_channels=1,
         kernel_shape=3,
         stride=1,
-        padding=snt.SAME,
+        padding=(padding_h, padding_w),
         name="conv1",
         use_bias=use_bias,
         initializers=create_constant_initializers(1.0, 1.0, use_bias))
 
     out = conv1(tf.constant(np.ones([1, 5, 5, 1], dtype=np.float32)))
-    expected_out = np.array([[5, 7, 7, 7, 5],
-                             [7, 10, 10, 10, 7],
-                             [7, 10, 10, 10, 7],
-                             [7, 10, 10, 10, 7],
-                             [5, 7, 7, 7, 5]])
-    if not use_bias:
-      expected_out -= 1
+    out = tf.squeeze(out, axis=(0, 3))
+    expected_out = np.asarray(expected_out, dtype=np.float32)
+    if use_bias:
+      expected_out += 1
 
     with self.test_session():
       tf.variables_initializer(
           [conv1.w, conv1.b] if use_bias else [conv1.w]).run()
 
-      self.assertAllClose(np.reshape(out.eval(), [5, 5]), expected_out)
-
-  @parameterized.named_parameters(
-      ("WithBias", True),
-      ("WithoutBias", False))
-  def testComputationValid(self, use_bias):
-    """Run through for something with a known answer using snt.VALID padding."""
-    conv1 = snt.Conv2D(
-        output_channels=1,
-        kernel_shape=3,
-        stride=1,
-        padding=snt.VALID,
-        name="conv1",
-        use_bias=use_bias,
-        initializers=create_constant_initializers(1.0, 1.0, use_bias))
-
-    out = conv1(tf.constant(np.ones([1, 5, 5, 1], dtype=np.float32)))
-    expected_output = np.array([[10, 10, 10],
-                                [10, 10, 10],
-                                [10, 10, 10]])
-    if not use_bias:
-      expected_output -= 1
-
-    with self.test_session():
-      tf.variables_initializer(
-          [conv1.w, conv1.b] if use_bias else [conv1.w]).run()
-
-      self.assertAllClose(np.reshape(out.eval(), [3, 3]), expected_output)
+      self.assertAllClose(out.eval(), expected_out)
 
   @parameterized.named_parameters(
       ("WithBias", True),
@@ -974,7 +1050,7 @@ class Conv2DTest(parameterized.TestCase, tf.test.TestCase):
     with self.assertRaises(TypeError) as cm:
       snt.Conv2D(output_channels=4, kernel_shape=(4, 4), mask=mask)(x)
     self.assertTrue(str(cm.exception).startswith(
-        "Mask needs to have dtype float16, float32 or float64"))
+        "Mask needs to have dtype float16, bfloat16, float32 or float64"))
 
   def testDataFormatNotSupported(self):
     """Errors are thrown when an unsupported data_format is used."""
@@ -1150,7 +1226,7 @@ class Conv2DTransposeTest(parameterized.TestCase, tf.test.TestCase):
     # Check kernel shapes, strides and padding match.
     self.assertEqual(conv2_transpose.kernel_shape, conv2.kernel_shape)
     self.assertEqual((1,) + conv2_transpose.stride[1:3] + (1,), conv2.stride)
-    self.assertEqual(conv2_transpose.padding, conv2.padding)
+    self.assertEqual(conv2_transpose.conv_op_padding, conv2.conv_op_padding)
 
     # Before conv2_transpose is connected, we cannot know how many
     # `output_channels` conv1 should have.
@@ -1203,7 +1279,7 @@ class Conv2DTransposeTest(parameterized.TestCase, tf.test.TestCase):
     # Check kernel shapes, strides and padding match.
     self.assertEqual(conv2_transpose.kernel_shape, conv2.kernel_shape)
     self.assertEqual((1,) + conv2_transpose.stride[1:3] + (1,), conv2.stride)
-    self.assertEqual(conv2_transpose.padding, conv2.padding)
+    self.assertEqual(conv2_transpose.conv_op_padding, conv2.conv_op_padding)
 
     # Before conv2_transpose is connected, we cannot know how many
     # `output_channels` conv1 should have.
@@ -1236,10 +1312,12 @@ class Conv2DTransposeTest(parameterized.TestCase, tf.test.TestCase):
 
 class Conv1DTest(parameterized.TestCase, tf.test.TestCase):
 
-  @parameterized.named_parameters(
-      ("WithBias", True),
-      ("WithoutBias", False))
-  def testShapes(self, use_bias):
+  @parameterized.parameters(*itertools.product(
+      [True, False],  # use_bias
+      conv.SUPPORTED_1D_DATA_FORMATS,  # data_format
+      conv.ALLOWED_PADDINGS  # padding
+  ))
+  def testShapes(self, use_bias, data_format, padding):
     """The generated shapes are correct with SAME and VALID padding."""
 
     batch_size = random.randint(1, 100)
@@ -1249,23 +1327,34 @@ class Conv1DTest(parameterized.TestCase, tf.test.TestCase):
 
     kernel_shape = random.randint(1, 10)
 
-    inputs = tf.placeholder(
-        tf.float32,
-        shape=[batch_size, in_length, in_channels])
+    if data_format == conv.DATA_FORMAT_NWC:
+      inputs = tf.placeholder(
+          tf.float32, shape=[batch_size, in_length, in_channels])
+    else:  # NCW
+      inputs = tf.placeholder(
+          tf.float32, shape=[batch_size, in_channels, in_length])
 
     conv1 = snt.Conv1D(
         output_channels=out_channels,
         kernel_shape=kernel_shape,
-        padding=snt.SAME,
+        padding=padding,
         stride=1,
+        data_format=data_format,
         name="conv1",
         use_bias=use_bias)
 
-    output1 = conv1(inputs)
+    output = conv1(inputs)
 
-    self.assertTrue(
-        output1.get_shape().is_compatible_with(
-            [batch_size, in_length, out_channels]))
+    expected_out_length = _PADDINGS_EXPECTED_SHAPE_TRANSFORMS[padding](
+        in_length, kernel_shape)
+    if data_format == conv.DATA_FORMAT_NWC:
+      self.assertTrue(
+          output.get_shape().is_compatible_with(
+              [batch_size, expected_out_length, out_channels]))
+    else:  # NCW
+      self.assertTrue(
+          output.get_shape().is_compatible_with(
+              [batch_size, out_channels, expected_out_length]))
 
     self.assertTrue(
         conv1.w.get_shape().is_compatible_with(
@@ -1274,29 +1363,6 @@ class Conv1DTest(parameterized.TestCase, tf.test.TestCase):
     if use_bias:
       self.assertTrue(
           conv1.b.get_shape().is_compatible_with(
-              [out_channels]))
-
-    conv2 = snt.Conv1D(
-        output_channels=out_channels,
-        kernel_shape=kernel_shape,
-        padding=snt.VALID,
-        stride=1,
-        name="conv2",
-        use_bias=use_bias)
-
-    output2 = conv2(inputs)
-
-    self.assertTrue(
-        output2.get_shape().is_compatible_with(
-            [batch_size, in_length - kernel_shape + 1, out_channels]))
-
-    self.assertTrue(
-        conv2.w.get_shape().is_compatible_with(
-            [kernel_shape, in_channels, out_channels]))
-
-    if use_bias:
-      self.assertTrue(
-          conv2.b.get_shape().is_compatible_with(
               [out_channels]))
 
   @parameterized.named_parameters(
@@ -1500,55 +1566,37 @@ class Conv1DTest(parameterized.TestCase, tf.test.TestCase):
     if use_bias:
       self.assertRegexpMatches(graph_regularizers[1].name, ".*l1_regularizer.*")
 
-  @parameterized.named_parameters(
-      ("WithBias", True),
-      ("WithoutBias", False))
-  def testComputationSame(self, use_bias):
-    """Run through for something with a known answer using SAME padding."""
+  @parameterized.parameters(*itertools.product(
+      [True, False],  # use_bias
+      [(snt.VALID, [3, 3, 3]),
+       (snt.SAME, [2, 3, 3, 3, 2]),
+       (snt.CAUSAL, [1, 2, 3, 3, 3]),
+       (snt.FULL, [1, 2, 3, 3, 3, 2, 1]),
+       (snt.REVERSE_CAUSAL, [3, 3, 3, 2, 1])]  # (padding, expected_out)
+  ))
+  def testComputation(self, use_bias, padding_and_expected_out):
+    """Run through for something with a known answer using different args."""
+    padding, expected_out = padding_and_expected_out
+
     conv1 = snt.Conv1D(
         output_channels=1,
         kernel_shape=3,
         stride=1,
-        padding=snt.SAME,
+        padding=padding,
         use_bias=use_bias,
         name="conv1",
         initializers=create_constant_initializers(1.0, 1.0, use_bias))
 
     out = conv1(tf.constant(np.ones([1, 5, 1], dtype=np.float32)))
-    expected_out = np.asarray([3, 4, 4, 4, 3])
-    if not use_bias:
-      expected_out -= 1
+    expected_out = np.asarray(expected_out, dtype=np.float32)
+    if use_bias:
+      expected_out += 1
 
     with self.test_session():
       tf.variables_initializer(
           [conv1.w, conv1.b] if use_bias else [conv1.w]).run()
 
-      self.assertAllClose(np.reshape(out.eval(), [5]), expected_out)
-
-  @parameterized.named_parameters(
-      ("WithBias", True),
-      ("WithoutBias", False))
-  def testComputationValid(self, use_bias):
-    """Run through for something with a known answer using snt.VALID padding."""
-    conv1 = snt.Conv1D(
-        output_channels=1,
-        kernel_shape=3,
-        stride=1,
-        padding=snt.VALID,
-        use_bias=use_bias,
-        name="conv1",
-        initializers=create_constant_initializers(1.0, 1.0, use_bias))
-
-    out = conv1(tf.constant(np.ones([1, 5, 1], dtype=np.float32)))
-    expected_out = np.asarray([4, 4, 4])
-    if not use_bias:
-      expected_out -= 1
-
-    with self.test_session():
-      tf.variables_initializer(
-          [conv1.w, conv1.b] if use_bias else [conv1.w]).run()
-
-      self.assertAllClose(np.reshape(out.eval(), [3]), expected_out)
+      self.assertAllClose(out.eval().flatten(), expected_out)
 
   @parameterized.named_parameters(
       ("WithBias", True),
@@ -1686,7 +1734,7 @@ class Conv1DTest(parameterized.TestCase, tf.test.TestCase):
     with self.assertRaises(TypeError) as cm:
       snt.Conv1D(output_channels=4, kernel_shape=4, mask=mask)(x)
     self.assertTrue(str(cm.exception).startswith(
-        "Mask needs to have dtype float16, float32 or float64"))
+        "Mask needs to have dtype float16, bfloat16, float32 or float64"))
 
   def testClone(self):
     net = snt.Conv1D(name="conv1d",
@@ -1994,7 +2042,7 @@ class Conv1DTransposeTest(parameterized.TestCase, tf.test.TestCase):
     # Check kernel shapes, strides and padding match.
     self.assertEqual(conv1_transpose.kernel_shape, conv1.kernel_shape)
     self.assertEqual((1, conv1_transpose.stride[1], 1), conv1.stride)
-    self.assertEqual(conv1_transpose.padding, conv1.padding)
+    self.assertEqual(conv1_transpose.conv_op_padding, conv1.conv_op_padding)
 
     # Before conv1_transpose is connected, we cannot know how many
     # `output_channels` conv1 should have.
@@ -2041,7 +2089,7 @@ class Conv1DTransposeTest(parameterized.TestCase, tf.test.TestCase):
     # Check kernel shapes, strides and padding match.
     self.assertEqual(conv1_transpose.kernel_shape, conv1.kernel_shape)
     self.assertEqual((1, 1, conv1_transpose.stride[2]), conv1.stride)
-    self.assertEqual(conv1_transpose.padding, conv1.padding)
+    self.assertEqual(conv1_transpose.conv_op_padding, conv1.conv_op_padding)
 
     # Before conv1_transpose is connected, we cannot know how many
     # `output_channels` conv1 should have.
@@ -2897,6 +2945,39 @@ class SeparableConv2DTest(parameterized.TestCase, tf.test.TestCase):
   @parameterized.named_parameters(
       ("WithBias", True),
       ("WithoutBias", False))
+  def testComputationSameNon1Rate(self, use_bias):
+    """Same as `testComputationSame`, but have a non-default rate."""
+
+    conv1 = snt.SeparableConv2D(
+        output_channels=1,
+        channel_multiplier=1,
+        kernel_shape=[3, 3],
+        padding=snt.SAME,
+        name="conv1",
+        rate=(2, 3),
+        use_bias=use_bias,
+        initializers=create_separable_constant_initializers(
+            1.0, 1.0, 1.0, use_bias))
+
+    out = conv1(tf.constant(np.ones([1, 5, 5, 1], dtype=np.float32)))
+    expected_out = np.array([[5, 5, 3, 5, 5],
+                             [5, 5, 3, 5, 5],
+                             [7, 7, 4, 7, 7],
+                             [5, 5, 3, 5, 5],
+                             [5, 5, 3, 5, 5]])
+    if not use_bias:
+      expected_out -= 1
+
+    with self.test_session():
+      tf.variables_initializer(
+          [conv1.w_dw, conv1.w_pw, conv1.b] if use_bias else
+          [conv1.w_dw, conv1.w_pw]).run()
+
+      self.assertAllClose(np.reshape(out.eval(), [5, 5]), expected_out)
+
+  @parameterized.named_parameters(
+      ("WithBias", True),
+      ("WithoutBias", False))
   def testComputationValid(self, use_bias):
     """Run through for something with a known answer using snt.VALID padding."""
 
@@ -3015,6 +3096,429 @@ class SeparableConv2DTest(parameterized.TestCase, tf.test.TestCase):
       # multiplier is kernel_shape[2] == 3. So weight layout must be:
       # (3, 3, 1, 3).
       w_dw = np.random.randn(3, 3, 1, 3)  # Now change the weights.
+      w_pw = np.random.randn(1, 1, 3, 3)  # Now change the weights.
+      conv1.w_dw.assign(w_dw).eval()
+      conv1.w_pw.assign(w_pw).eval()
+      self.assertAllClose(out1.eval(), out2.eval())
+
+
+class SeparableConv1DTest(parameterized.TestCase, tf.test.TestCase):
+
+  def setUp(self):
+    """Set up some variables to re-use in multiple tests."""
+
+    super(SeparableConv1DTest, self).setUp()
+
+    self.batch_size = batch_size = random.randint(1, 100)
+    self.in_width = in_width = random.randint(10, 188)
+    self.in_channels = in_channels = random.randint(1, 10)
+    self.input_shape = [batch_size, in_width, in_channels]
+
+    self.kernel_shape_w = kernel_shape_w = random.randint(1, 10)
+    self.channel_multiplier = channel_multiplier = random.randint(1, 10)
+    self.kernel_shape = [kernel_shape_w]
+
+    self.out_channels_dw = out_channels_dw = in_channels * channel_multiplier
+    self.output_shape = [batch_size, in_width, out_channels_dw]
+    self.depthwise_filter_shape = [
+        1, kernel_shape_w, in_channels, channel_multiplier
+    ]
+    self.pointwise_filter_shape = [1, 1, out_channels_dw, out_channels_dw]
+
+  @parameterized.named_parameters(
+      ("WithBias", True),
+      ("WithoutBias", False))
+  def testShapesSame(self, use_bias):
+    """Test that the generated shapes are correct with SAME padding."""
+
+    out_channels = self.out_channels_dw
+    input_shape = self.input_shape
+    kernel_shape = self.kernel_shape
+    output_shape = self.output_shape
+    depthwise_filter_shape = self.depthwise_filter_shape
+    pointwise_filter_shape = self.pointwise_filter_shape
+    channel_multiplier = self.channel_multiplier
+
+    inputs = tf.placeholder(tf.float32, shape=input_shape)
+
+    conv1 = snt.SeparableConv1D(
+        output_channels=out_channels,
+        channel_multiplier=channel_multiplier,
+        kernel_shape=kernel_shape,
+        padding=snt.SAME,
+        use_bias=use_bias)
+
+    output = conv1(inputs)
+
+    self.assertTrue(output.get_shape().is_compatible_with(output_shape))
+    self.assertTrue(conv1.w_dw.get_shape().is_compatible_with(
+        depthwise_filter_shape))
+    self.assertTrue(conv1.w_pw.get_shape().is_compatible_with(
+        pointwise_filter_shape))
+    if use_bias:
+      self.assertTrue(conv1.b.get_shape().is_compatible_with([out_channels]))
+
+  @parameterized.named_parameters(
+      ("WithBias", True),
+      ("WithoutBias", False))
+  def testShapesNotKnown(self, use_bias):
+    """Test that the generated shapes are correct when input shape not known."""
+
+    inputs = tf.placeholder(
+        tf.float32, shape=[None, None, self.in_channels], name="inputs")
+
+    conv1 = snt.SeparableConv1D(
+        output_channels=self.out_channels_dw,
+        channel_multiplier=1,
+        kernel_shape=self.kernel_shape,
+        padding=snt.SAME,
+        use_bias=use_bias)
+    output = conv1(inputs)
+
+    with self.test_session() as session:
+      tf.variables_initializer(
+          [conv1.w_dw, conv1.w_pw, conv1.b] if use_bias else
+          [conv1.w_dw, conv1.w_pw]).run()
+      output_eval = session.run(output, {inputs: np.zeros(self.input_shape)})
+    self.assertEqual(output_eval.shape, tuple(self.output_shape))
+
+  @parameterized.named_parameters(
+      ("WithBias", True),
+      ("WithoutBias", False))
+  def testKernelShape(self, use_bias):
+    """Test that errors are thrown for invalid kernel shapes."""
+
+    # No check against output_channels is done yet (needs input size).
+    snt.SeparableConv1D(
+        output_channels=1,
+        channel_multiplier=2,
+        kernel_shape=[3],
+        name="conv1",
+        use_bias=use_bias)
+    snt.SeparableConv1D(
+        output_channels=1, channel_multiplier=1, kernel_shape=3, name="conv1")
+
+    error_msg = (r"Invalid kernel shape: x is \[3, 3\], must be either a "
+                 r"positive integer or an iterable of positive integers of "
+                 r"size 1")
+    with self.assertRaisesRegexp(snt.IncompatibleShapeError, error_msg):
+      snt.SeparableConv1D(output_channels=1,
+                          channel_multiplier=3,
+                          kernel_shape=[3, 3],
+                          use_bias=use_bias)
+
+  @parameterized.named_parameters(
+      ("WithBias", True),
+      ("WithoutBias", False))
+  def testStrideError(self, use_bias):
+    """Test that errors are thrown for invalid strides."""
+
+    snt.SeparableConv1D(
+        output_channels=1, channel_multiplier=3, kernel_shape=3, stride=1,
+        use_bias=use_bias)
+    snt.SeparableConv1D(
+        output_channels=1, channel_multiplier=3, kernel_shape=3, stride=[1],
+        use_bias=use_bias)
+    snt.SeparableConv1D(
+        output_channels=1,
+        channel_multiplier=3,
+        kernel_shape=3,
+        stride=[1, 1, 1],
+        use_bias=use_bias)
+
+    error_msg = (r"Invalid stride shape: x is \[1, 1\], must be "
+                 r"either a positive integer or an iterable of positive "
+                 r"integers of size 1")
+    with self.assertRaisesRegexp(snt.IncompatibleShapeError, error_msg):
+      snt.SeparableConv1D(output_channels=1,
+                          channel_multiplier=3,
+                          kernel_shape=3,
+                          stride=[1, 1],
+                          name="conv1",
+                          use_bias=use_bias)
+
+  @parameterized.named_parameters(
+      ("WithBias", True),
+      ("WithoutBias", False))
+  def testInputTypeError(self, use_bias):
+    """Test that errors are thrown for invalid input types."""
+    conv1 = snt.SeparableConv1D(
+        output_channels=3,
+        channel_multiplier=1,
+        kernel_shape=3,
+        padding=snt.SAME,
+        use_bias=use_bias,
+        initializers=create_separable_constant_initializers(
+            1.0, 1.0, 1.0, use_bias))
+
+    for dtype in (tf.uint32, tf.float64):
+      x = tf.constant(np.ones([1, 5, 1]), dtype=dtype)
+      err = "Input must have dtype tf.float.*"
+      with self.assertRaisesRegexp(TypeError, err):
+        conv1(x)
+
+  @parameterized.named_parameters(
+      ("WithBias", True),
+      ("WithoutBias", False))
+  def testInitializers(self, use_bias):
+    """Test that initializers work as expected."""
+
+    w_dw = random.random()
+    w_pw = random.random()
+    b = np.random.randn(6)  # Kernel shape is 3, input channels are 2, 2*3 = 6.
+    conv1 = snt.SeparableConv1D(
+        output_channels=6,
+        channel_multiplier=3,
+        kernel_shape=3,
+        use_bias=use_bias,
+        initializers=create_separable_constant_initializers(
+            w_dw, w_pw, b, use_bias))
+
+    conv1(tf.placeholder(tf.float32, [1, 10, 2]))
+
+    with self.test_session():
+      tf.variables_initializer(
+          [conv1.w_dw, conv1.w_pw, conv1.b] if use_bias else
+          [conv1.w_dw, conv1.w_pw]).run()
+
+      self.assertAllClose(
+          conv1.w_dw.eval(), np.full(
+              [1, 3, 2, 3], w_dw, dtype=np.float32))
+      self.assertAllClose(
+          conv1.w_pw.eval(), np.full(
+              [1, 1, 6, 6], w_pw, dtype=np.float32))
+
+      if use_bias:
+        self.assertAllClose(conv1.b.eval(), b)
+
+    error_msg = "Initializer for 'w_dw' is not a callable function"
+    with self.assertRaisesRegexp(TypeError, error_msg):
+      snt.SeparableConv1D(
+          output_channels=3,
+          channel_multiplier=1,
+          kernel_shape=3,
+          stride=1,
+          use_bias=use_bias,
+          initializers={"w_dw": tf.ones([])})
+
+  def testInitializerMutation(self):
+    """Test that initializers are not mutated."""
+
+    initializers = {"b": tf.constant_initializer(0)}
+    initializers_copy = dict(initializers)
+
+    conv1 = snt.SeparableConv1D(
+        output_channels=3,
+        channel_multiplier=1,
+        kernel_shape=3,
+        stride=1,
+        initializers=initializers)
+
+    conv1(tf.placeholder(tf.float32, [10, 1, 2]))
+
+    self.assertAllEqual(initializers, initializers_copy)
+
+  @parameterized.named_parameters(
+      ("WithBias", True),
+      ("WithoutBias", False))
+  def testRegularizersInRegularizationLosses(self, use_bias):
+    regularizers = create_separable_regularizers(
+        use_bias, tf.contrib.layers.l1_regularizer(scale=0.5))
+
+    conv1 = snt.SeparableConv1D(
+        output_channels=3,
+        channel_multiplier=1,
+        kernel_shape=3,
+        stride=1,
+        regularizers=regularizers,
+        use_bias=use_bias,
+        name="conv1")
+    conv1(tf.placeholder(tf.float32, [10, 1, 2]))
+
+    graph_regularizers = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+    self.assertRegexpMatches(graph_regularizers[0].name, ".*l1_regularizer.*")
+    self.assertRegexpMatches(graph_regularizers[1].name, ".*l1_regularizer.*")
+    if use_bias:
+      self.assertRegexpMatches(graph_regularizers[2].name, ".*l1_regularizer.*")
+
+  @parameterized.named_parameters(
+      ("WithBias", True),
+      ("WithoutBias", False))
+  def testComputationSame(self, use_bias):
+    """Run through for something with a known answer using SAME padding."""
+
+    conv1 = snt.SeparableConv1D(
+        output_channels=1,
+        channel_multiplier=1,
+        kernel_shape=[3],
+        padding=snt.SAME,
+        name="conv1",
+        use_bias=use_bias,
+        initializers=create_separable_constant_initializers(
+            1.0, 1.0, 1.0, use_bias))
+
+    output = conv1(tf.constant(np.ones([1, 5, 1], dtype=np.float32)))
+    expected_out = np.array([[[3], [4], [4], [4], [3]]])
+    if not use_bias:
+      expected_out -= 1
+
+    with self.test_session() as session:
+      tf.variables_initializer(
+          [conv1.w_dw, conv1.w_pw, conv1.b] if use_bias else
+          [conv1.w_dw, conv1.w_pw]).run()
+      output = session.run(output)
+      self.assertAllClose(output, expected_out)
+
+  @parameterized.named_parameters(
+      ("WithBiasRateInt", True, 2),
+      ("WithBiasRateSeq", True, [2]),
+      ("WithoutBiasRateInt", False, 2),
+      ("WithoutBiasRateSeq", False, [2]))
+  def testComputationSameNon1Rate(self, use_bias, rate):
+    """Same as `testComputationSame`, but have a non-default rate."""
+
+    conv1 = snt.SeparableConv1D(
+        output_channels=1,
+        channel_multiplier=1,
+        kernel_shape=[3],
+        padding=snt.SAME,
+        name="conv1",
+        rate=rate,
+        use_bias=use_bias,
+        initializers=create_separable_constant_initializers(
+            1.0, 1.0, 1.0, use_bias))
+
+    output = conv1(tf.constant(np.ones([3, 5, 2], dtype=np.float32)))
+    expected_out = np.array([[[5], [5], [7], [5], [5]],
+                             [[5], [5], [7], [5], [5]],
+                             [[5], [5], [7], [5], [5]]])
+    if not use_bias:
+      expected_out -= 1
+
+    with self.test_session() as session:
+      tf.variables_initializer(
+          [conv1.w_dw, conv1.w_pw, conv1.b] if use_bias else
+          [conv1.w_dw, conv1.w_pw]).run()
+      output = session.run(output)
+      self.assertAllClose(output, expected_out)
+
+  @parameterized.named_parameters(
+      ("WithBias", True),
+      ("WithoutBias", False))
+  def testComputationValid(self, use_bias):
+    """Run through for something with a known answer using snt.VALID padding."""
+
+    conv1 = snt.SeparableConv1D(
+        output_channels=1,
+        channel_multiplier=1,
+        kernel_shape=[3],
+        padding=snt.VALID,
+        use_bias=use_bias,
+        initializers=create_separable_constant_initializers(
+            1.0, 1.0, 1.0, use_bias))
+
+    out = conv1(tf.constant(np.ones([1, 5, 1], dtype=np.float32)))
+    expected_out = np.array([[[4.], [4.], [4.]]])
+    if not use_bias:
+      expected_out -= 1
+
+    with self.test_session() as session:
+      tf.variables_initializer(
+          [conv1.w_dw, conv1.w_pw, conv1.b] if use_bias else
+          [conv1.w_dw, conv1.w_pw]).run()
+      out = session.run(out)
+      self.assertAllClose(out, expected_out)
+
+  @parameterized.named_parameters(
+      ("WithBias", True),
+      ("WithoutBias", False))
+  def testComputationValidMultiChannel(self, use_bias):
+    """Run through for something with a known answer using snt.VALID padding."""
+
+    conv1 = snt.SeparableConv1D(
+        output_channels=3,
+        channel_multiplier=1,
+        kernel_shape=[3],
+        padding=snt.VALID,
+        use_bias=use_bias,
+        initializers=create_separable_constant_initializers(
+            1.0, 1.0, 1.0, use_bias))
+
+    out = conv1(tf.constant(np.ones([1, 5, 3], dtype=np.float32)))
+    expected_out = np.array([[[10] * 3] * 3] * 1)
+    if not use_bias:
+      expected_out -= 1
+
+    with self.test_session() as session:
+      tf.variables_initializer(
+          [conv1.w_dw, conv1.w_pw, conv1.b] if use_bias else
+          [conv1.w_dw, conv1.w_pw]).run()
+      out = session.run(out)
+      self.assertAllClose(out, expected_out)
+
+  @parameterized.named_parameters(
+      ("WithBias", True),
+      ("WithoutBias", False))
+  def testComputationValidChannelMultiplier(self, use_bias):
+    """Run through for something with a known answer using snt.VALID padding."""
+
+    input_channels = 3
+    channel_multiplier = 5
+    output_channels = input_channels * channel_multiplier
+    conv1 = snt.SeparableConv1D(
+        output_channels=output_channels,
+        channel_multiplier=channel_multiplier,
+        kernel_shape=[3],
+        padding=snt.VALID,
+        use_bias=use_bias,
+        initializers=create_separable_constant_initializers(
+            1.0, 1.0, 1.0, use_bias))
+
+    input_data = np.ones([1, 5, input_channels], dtype=np.float32)
+    out = conv1(tf.constant(input_data))
+    expected_out = np.ones((1, 3, output_channels)) * 46
+    if not use_bias:
+      expected_out -= 1
+
+    self.assertTrue(out.get_shape().is_compatible_with([1, 3, output_channels]))
+
+    with self.test_session() as session:
+      tf.variables_initializer(
+          [conv1.w_dw, conv1.w_pw, conv1.b] if use_bias else
+          [conv1.w_dw, conv1.w_pw]).run()
+      out = session.run(out)
+      self.assertAllClose(out, expected_out)
+      # Each convolution with weight 1 and size 1x3 results in an output of 3.
+      # Pointwise filter is [1, 1, input_channels * channel_multiplier = 15, x].
+      # Results in 3 * 15 = 45 + 1 bias = 46 as outputs.
+
+  @parameterized.named_parameters(
+      ("WithBias", True),
+      ("WithoutBias", False))
+  def testSharing(self, use_bias):
+    """Sharing is working."""
+    conv1 = snt.SeparableConv1D(
+        output_channels=3, channel_multiplier=3, kernel_shape=3,
+        use_bias=use_bias)
+
+    x = np.random.randn(1, 5, 1)
+    x1 = tf.constant(x, dtype=np.float32)
+    x2 = tf.constant(x, dtype=np.float32)
+
+    out1 = conv1(x1)
+    out2 = conv1(x2)
+
+    with self.test_session():
+      tf.variables_initializer(
+          [conv1.w_dw, conv1.w_pw, conv1.b] if use_bias else
+          [conv1.w_dw, conv1.w_pw]).run()
+      self.assertAllClose(out1.eval(), out2.eval())
+
+      # Kernel shape was set to 3, which is expandeded to [1, 3].
+      # Input channels are 1, output channels := in_channels * multiplier.
+      # multiplier is kernel_shape[2] == 3. So weight layout must be:
+      # (1, 3, 1, 3).
+      w_dw = np.random.randn(1, 3, 1, 3)  # Now change the weights.
       w_pw = np.random.randn(1, 1, 3, 3)  # Now change the weights.
       conv1.w_dw.assign(w_dw).eval()
       conv1.w_pw.assign(w_pw).eval()
@@ -3534,7 +4038,7 @@ class Conv3DTest(parameterized.TestCase, tf.test.TestCase):
     with self.assertRaises(TypeError) as cm:
       snt.Conv3D(output_channels=4, kernel_shape=(4, 4, 4), mask=mask)(x)
     self.assertTrue(str(cm.exception).startswith(
-        "Mask needs to have dtype float16, float32 or float64"))
+        "Mask needs to have dtype float16, bfloat16, float32 or float64"))
 
   def testClone(self):
     net = snt.Conv3D(name="conv3d",
@@ -3766,7 +4270,7 @@ class Conv3DTransposeTest(parameterized.TestCase, tf.test.TestCase):
     # Check kernel shapes, strides and padding match.
     self.assertEqual(conv3_transpose.kernel_shape, conv3.kernel_shape)
     self.assertEqual((1,) + self.strides + (1,), conv3.stride)
-    self.assertEqual(conv3_transpose.padding, conv3.padding)
+    self.assertEqual(conv3_transpose.conv_op_padding, conv3.conv_op_padding)
 
     # Before conv3_transpose is connected, we cannot know how many
     # `output_channels` conv1 should have.
@@ -3812,7 +4316,7 @@ class Conv3DTransposeTest(parameterized.TestCase, tf.test.TestCase):
     # Check kernel shapes, strides and padding match.
     self.assertEqual(conv3_transpose.kernel_shape, conv3.kernel_shape)
     self.assertEqual((1, 1) + self.strides, conv3.stride)
-    self.assertEqual(conv3_transpose.padding, conv3.padding)
+    self.assertEqual(conv3_transpose.conv_op_padding, conv3.conv_op_padding)
 
     # Before conv3_transpose is connected, we cannot know how many
     # `output_channels` conv1 should have.

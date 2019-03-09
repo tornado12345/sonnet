@@ -27,15 +27,17 @@ from __future__ import print_function
 import abc
 import collections
 import contextlib
-import functools
 import inspect
-import weakref
+import threading
+import types
 
 # Dependency imports
+import contextlib2
 import six
 from sonnet.python.modules import base_info
 from sonnet.python.modules import util
 import tensorflow as tf
+import wrapt
 
 # Import error class from base_errors for backward compatibility.
 
@@ -52,87 +54,51 @@ from sonnet.python.modules.base_errors import ModuleInfoError
 # pylint: enable=unused-import
 
 
-# Maps `tf.Graph` objects to a module call stack.
-_MODULE_STACKS = weakref.WeakKeyDictionary()
+_LOCAL_STACKS = threading.local()
 
 
+def _get_or_create_stack(name):
+  """Returns a thread local stack uniquified by the given name."""
+  stack = getattr(_LOCAL_STACKS, name, None)
+  if stack is None:
+    stack = []
+    setattr(_LOCAL_STACKS, name, stack)
+  return stack
 
-def _maybe_wrap_custom_getter(custom_getter, old_getter):
-  """Wrap a call to a custom_getter to use the old_getter internally.
-
-  Copied from [variable_scope._maybe_wrap_custom_getter](
-  https://github.com/tensorflow/tensorflow/blob/master/tensorflow/python/
-  ops/variable_scope.py#L1565)
-
-  Args:
-    custom_getter: The wrapping custom getter.
-    old_getter: The wrapped custom getter.
-
-  Returns:
-    A new custom getter that calls `old_getter` and then `custom_getter`.
-  """
-  if old_getter is None:
-    return custom_getter
-
-  # The new custom_getter should call the old one
-  def wrapped_custom_getter(getter, *args, **kwargs):
-    # Call:
-    #  custom_getter(
-    #    lambda: old_getter(true_getter, ...), *args, **kwargs)
-    # which means custom_getter will call old_getter, which
-    # will call the true_getter, perform any intermediate
-    # processing, and return the results to the current
-    # getter, which will also perform additional processing.
-    return custom_getter(functools.partial(old_getter, getter), *args, **kwargs)
-
-  return wrapped_custom_getter
+get_module_stack = lambda: _get_or_create_stack("modules")
+get_connection_stack = lambda: _get_or_create_stack("connections")
 
 
-def _variable_tracking_custom_getter(getter, *args, **kwargs):
-  """Custom getter that tracks variables created.
+@contextlib.contextmanager
+def observe_connections(observer):
+  """Notifies the observer whenever any Sonnet module is connected to the graph.
 
-  This custom getter places any variables that `getter` creates into the
-  `_all_variables` attribute of the `AbstractModule` that is on top of the
-  module call stack. The module call stack is a graph-dependent stack that
-  keeps track of the sonnet module call order.
+  If a module contains nested modules, the observer is notified once for each
+  nested module, followed by the containing module.
 
-  Note that this assumes that variables added appended to `tf.Graph`
-  collections. This is a safe assumption to make because
-  `tf.add_to_collection()` appends objects to collections, and `tf.Variable`
-  uses `tf.add_to_collections()` to add itself to `tf.Graph` collections.
+  For example:
 
-  Note that this assumes that all variables are added either the
-  `tf.GraphKeys.GLOBAL_VARIABLES` or `tf.GraphKeys.LOCAL_VARIABLES` collection.
+  ```python
+  def logging_observer(connected_subgraph):
+    logging.info(connected_subgraph.module.module_name)
+
+  with snt.observe_connections(logging_observer):
+    output = imagenet_module(input_tensor)
+  ```
 
   Args:
-    getter: The true getter or another custom getter.
-    *args: See positional arguments for `tf.get_variable()`.
-    **kwargs: See keyword arguments for `tf.get_variable()`.
+    observer: Callable accepting a single argument. Will be called with a
+    `ConnectedSubGraph` each time a module is connected to the graph.
 
-  Returns:
-    See docstring for `tf.get_variable()`.
+  Yields:
+    None: just yields control to the inner context.
   """
-  # Get the module that is calling `tf.get_variable()`
-  module_stack = _MODULE_STACKS[tf.get_default_graph()]
-  module = module_stack[-1]
-
-  # Get lists of local and global variables. We use `tf.get_collection_ref()`
-  # instead of `tf.get_collection()` to avoid copying the collections.
-  local_variables = tf.get_collection_ref(tf.GraphKeys.LOCAL_VARIABLES)
-  global_variables = tf.get_collection_ref(tf.GraphKeys.GLOBAL_VARIABLES)
-
-  num_local_vars_before = len(local_variables)
-  num_global_vars_before = len(global_variables)
-
-  out = getter(*args, **kwargs)
-
-  # Add any local or global variables that have been created to `module`
-  # pylint: disable=protected-access
-  module._all_variables.update(local_variables[num_local_vars_before:])
-  module._all_variables.update(global_variables[num_global_vars_before:])
-  # pylint: enable=protected-access
-
-  return out
+  connection_stack = get_connection_stack()
+  connection_stack.append(observer)
+  try:
+    yield
+  finally:
+    connection_stack.pop()
 
 
 @six.add_metaclass(abc.ABCMeta)
@@ -191,8 +157,10 @@ class AbstractModule(object):
     if name is None:
       name = util.to_snake_case(self.__class__.__name__)
     elif not isinstance(name, six.string_types):
-      raise TypeError("Name must be a string.")
+      raise TypeError("Name must be a string, not {} of type {}.".format(
+          name, type(name)))
 
+    self._is_connected = False
     self._connected_subgraphs = []
 
     # If the given custom getter is a dictionary with a per-variable custom
@@ -201,12 +169,10 @@ class AbstractModule(object):
       self._custom_getter = util.custom_getter_router(
           custom_getter_map=custom_getter,
           name_fn=lambda name: name[len(self.scope_name) + 1:])
+    elif custom_getter is not None and not callable(custom_getter):
+      raise TypeError("Given custom_getter is not callable.")
     else:
-      if not (custom_getter is None or callable(custom_getter)):
-        raise TypeError("Given custom_getter is not callable.")
       self._custom_getter = custom_getter
-    self._custom_getter = _maybe_wrap_custom_getter(
-        _variable_tracking_custom_getter, self._custom_getter)
 
     self._template = tf.make_template(name,
                                       self._build_wrapper,
@@ -215,6 +181,17 @@ class AbstractModule(object):
 
     self._original_name = name
     self._unique_name = self._template.variable_scope.name.split("/")[-1]
+
+    # Copy signature of _build to __call__.
+    adapter_fn = getattr(self._build, "__func__", self._build)
+    @wrapt.decorator(adapter=adapter_fn)
+    def copy_signature(method, unused_instance, args, kwargs):
+      return method(*args, **kwargs)
+    @copy_signature
+    def __call__(instance, *args, **kwargs):  # pylint: disable=invalid-name
+      return AbstractModule.__call__(instance, *args, **kwargs)
+    # use __dict__ instead of setting directly to avoid a Callable pytype error
+    self.__dict__["__call__"] = types.MethodType(__call__, self)
 
     # Update __call__ and the object docstrings to enable better introspection.
     self.__doc__ = self._build.__doc__
@@ -227,6 +204,10 @@ class AbstractModule(object):
 
     # Container for all variables created in this module and its sub-modules.
     self._all_variables = set([])
+
+    # Calling `.defun()` causes the module's call method to become wrapped as
+    # a graph function.
+    self._defun_wrapped = False
 
   def _build_wrapper(self, *args, **kwargs):
     """Function which will be wrapped in a Template to do variable sharing.
@@ -290,12 +271,23 @@ class AbstractModule(object):
       DifferentGraphError: if the module is connected to a different Graph than
         it was previously used in.
     """
-    current_graph = tf.get_default_graph()
+    with tf.init_scope():
+      # We need `init_scope` incase we're running inside a defun. In that case
+      # what we want is information about where the function will be called not
+      # where the function is being built.
+      current_graph = tf.get_default_graph()
+      will_call_in_eager_context = tf.executing_eagerly()
+
     if self._graph is None:
       self._graph = current_graph
       self._set_module_info()
-    elif self._graph != current_graph:
-      raise DifferentGraphError("Cannot connect module to multiple Graphs.")
+
+    if not will_call_in_eager_context:
+      # Same graph checks only make sense when calling from graph mode (in eager
+      # mode there is a single process level context where all modules are
+      # created).
+      if self._graph != current_graph:
+        raise DifferentGraphError("Cannot connect module to multiple Graphs.")
 
   @abc.abstractmethod
   def _build(self, *args, **kwargs):
@@ -327,10 +319,28 @@ class AbstractModule(object):
     Yields:
       Nothing, the yield just transfers focus back to the inner context.
     """
-    module_stack = _MODULE_STACKS.setdefault(self._graph, [])
+    module_stack = get_module_stack()
     module_stack.append(self)
     try:
-      yield
+      with contextlib2.ExitStack() as stack:
+        # Ideally move re-entering store into Template.variable_scope.
+        template_store = getattr(self._template, "_template_store", None)
+        if template_store is not None:
+          # In eager mode, the template store keeps references to created
+          # variables such that they survive even if there are no references to
+          # them in Python code. Variables added to an eager template store are
+          # also added to TensorFlow global collections (unlike regular
+          # variables created in eager mode).
+          stack.enter_context(template_store.as_default())
+
+        stack.enter_context(
+            util.notify_about_new_variables(self._all_variables.add))
+
+        yield
+
+        if self._original_name:
+          self._all_variables.update(self._template.variables)
+
     finally:
       # Remove `self` from `module_stack`, this happens as part of cleanup
       # even if an error is raised.
@@ -368,12 +378,32 @@ class AbstractModule(object):
         outputs=outputs)
     self._connected_subgraphs.append(connected_subgraph)
 
+    for observer in get_connection_stack():
+      observer(connected_subgraph)
+
+  @property
+  def defun_wrapped(self):
+    """Returns boolean indicating whether this module is defun wrapped."""
+    return self._defun_wrapped
+
+  def defun(self):
+    """Wraps this modules call method in a callable graph function."""
+    if not self._defun_wrapped:
+      self._defun_wrapped = True
+      self._call = tf.contrib.eager.defun(self._call)
+
   def __call__(self, *args, **kwargs):
-    """Operator overload for calling.
+    return self._call(*args, **kwargs)
+
+  def _call(self, *args, **kwargs):
+    """Entry point when a module is called to connect it to the graph.
 
     This is the entry point when users connect a Module into the Graph. The
     underlying _build method will have been wrapped in a Template by the
     constructor, and we call this template with the provided inputs here.
+
+    Note we use `_call` instead of `__call__` to allow instance level monkey
+    patching (see `defun`).
 
     Args:
       *args: Arguments for underlying _build method.
@@ -386,13 +416,21 @@ class AbstractModule(object):
     self._check_same_graph()
     with self._capture_variables():
       outputs, subgraph_name_scope = self._template(*args, **kwargs)
-    self._add_connected_subgraph(self._build, outputs, subgraph_name_scope,
-                                 *args, **kwargs)
+    self._is_connected = True
+    if not tf.executing_eagerly():
+      # In eager mode the module is called a lot more frequently than in graph
+      # mode (for each training step) and so we don't keep track of connected
+      # subgraphs (since there will be orders of magnitude more of them).
+      self._add_connected_subgraph(self._build, outputs, subgraph_name_scope,
+                                   *args, **kwargs)
     return outputs
 
   @property
   def name_scopes(self):
     """Returns a tuple of all name_scopes generated by this module."""
+    if tf.executing_eagerly():
+      raise NotSupportedError(
+          "The name_scopes property is not supported in eager mode.")
     return tuple(subgraph.name_scope for subgraph in self._connected_subgraphs)
 
   @property
@@ -429,7 +467,7 @@ class AbstractModule(object):
   @property
   def is_connected(self):
     """Returns true iff the Module been connected to the Graph at least once."""
-    return bool(self._connected_subgraphs)
+    return self._is_connected
 
   @property
   def graph(self):
@@ -439,6 +477,9 @@ class AbstractModule(object):
   @property
   def connected_subgraphs(self):
     """Returns the subgraphs created by this module so far."""
+    if tf.executing_eagerly():
+      raise NotSupportedError(
+          "Connected sub-graphs are not tracked in eager mode.")
     return tuple(self._connected_subgraphs)
 
   @property
@@ -451,6 +492,9 @@ class AbstractModule(object):
     Raises:
       NotConnectedError: If the module is not connected to the Graph.
     """
+    if tf.executing_eagerly():
+      raise NotSupportedError(
+          "Connected sub-graphs are not tracked in eager mode.")
     self._ensure_is_connected()
     return self._connected_subgraphs[-1]
 
@@ -487,7 +531,7 @@ class AbstractModule(object):
 
   # pylint: disable=g-doc-return-or-yield
   @contextlib.contextmanager
-  def _enter_variable_scope(self, reuse=None):
+  def _enter_variable_scope(self, reuse=None, check_same_graph=True):
     """Returns a contextlib.contextmanager to enter the internal variable scope.
 
     This is useful for situations where submodules must be declared in the
@@ -521,16 +565,75 @@ class AbstractModule(object):
 
     Args:
       reuse: Boolean passed to `tf.variable_scope`.
+      check_same_graph: Boolean to determine if same graph check should run. If
+        you are only entering the scope to name other variable scopes (e.g. not
+        to create/reuse variables) then it is legitimate to set this to False.
 
     Yields:
       The variable_scope inside the template.
     """
     self._check_init_called()
-    self._check_same_graph()
+    if check_same_graph:
+      self._check_same_graph()
     with self._capture_variables():
       with tf.variable_scope(self._template.variable_scope, reuse=reuse) as vs:
         yield vs
   # pylint: enable=g-doc-return-or-yield
+
+  @property
+  def variables(self):
+    """**All** `tf.Variable`s used when the module is connected.
+
+    This property does not rely on global collections and should generally be
+    preferred vs. `get_variables` and `get_all_variables`.
+
+    See the documentation for `AbstractModule._capture_variables()` for more
+    information about what variables are captured.
+
+    Returns:
+      A sorted (by variable name) tuple of `tf.Variable` objects.
+
+    Raises:
+      NotConnectedError: If the module is not connected to the Graph.
+    """
+    self._ensure_is_connected()
+    return util.sort_by_name(self._all_variables)
+
+  @property
+  def trainable_variables(self):
+    """All **trainable** `tf.Variable`s used when the module is connected.
+
+    This property does not rely on global collections and should generally be
+    preferred vs. `get_variables` and `get_all_variables`.
+
+    See the documentation for `AbstractModule._capture_variables()` for more
+    information about what variables are captured.
+
+    Returns:
+      A sorted (by variable name) tuple of `tf.Variable` objects.
+
+    Raises:
+      NotConnectedError: If the module is not connected to the Graph.
+    """
+    return tuple(v for v in self.variables if v.trainable)
+
+  @property
+  def non_trainable_variables(self):
+    """All **non-trainable** `tf.Variable`s used when the module is connected.
+
+    This property does not rely on global collections and should generally be
+    preferred vs. `get_variables` and `get_all_variables`.
+
+    See the documentation for `AbstractModule._capture_variables()` for more
+    information about what variables are captured.
+
+    Returns:
+      A sorted (by variable name) tuple of `tf.Variable` objects.
+
+    Raises:
+      NotConnectedError: If the module is not connected to the Graph.
+    """
+    return tuple(v for v in self.variables if not v.trainable)
 
   def get_variables(self, collection=tf.GraphKeys.TRAINABLE_VARIABLES):
     """Returns tuple of `tf.Variable`s declared inside this module.
@@ -554,6 +657,13 @@ class AbstractModule(object):
       NotConnectedError: If the module is not connected to the Graph.
     """
     self._ensure_is_connected()
+
+    if self._defun_wrapped and tf.executing_eagerly():
+      raise NotSupportedError(
+          "`module.get_variables()` relies on TensorFlow collections which are "
+          "not supported when your module is wrapped with defun. Instead use "
+          "`module.trainable_variables` or `module.variables`.")
+
     # Explicitly re-enter Graph, in case the module is being queried with a
     # different default Graph from the one it was connected to. If this was not
     # here then querying the variables from a different graph scope would
@@ -582,15 +692,22 @@ class AbstractModule(object):
     self._ensure_is_connected()
     collection_variables = set(tf.get_collection(collection))
     # Return variables in self._all_variables that are in `collection`
-    return tuple(
-        sorted(
-            self._all_variables & collection_variables, key=lambda v: v.name))
+    return util.sort_by_name(self._all_variables & collection_variables)
 
   def __getstate__(self):
     raise NotSupportedError(
         "Sonnet AbstractModule instances cannot be serialized. You should "
         "instead serialize all necessary configuration which will allow "
         "modules to be rebuilt.")
+
+  def _maybe_log(self, fstr, *args, **kwargs):
+    """Logs a message to tf.logging.info, if the `verbose` kwarg is true."""
+    # If verbose is not set, we don't do any logging. This allows users to
+    # put logging throughout their code, and enable or disable it with one
+    # variable, rather than needing lots of if statements.
+    if "verbose" in kwargs and kwargs["verbose"]:
+      del kwargs["verbose"]
+      tf.logging.info("%s: " + fstr, self.scope_name, *args, **kwargs)
 
 
 @six.add_metaclass(abc.ABCMeta)

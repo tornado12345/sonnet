@@ -7,6 +7,8 @@ exports_files(["LICENSE"])
 
 package(default_visibility = ["//visibility:public"])
 
+# Placeholder for internal Python version compatibility macro.
+
 py_library(
     name = "base",
     srcs = [
@@ -19,6 +21,7 @@ py_library(
     deps = [
         ":util",
         # tensorflow dep,
+        # wrapt dep,
     ],
 )
 
@@ -41,12 +44,15 @@ py_library(
         "custom_getters/bayes_by_backprop.py",
         "custom_getters/context.py",
         "custom_getters/non_trainable.py",
+        "custom_getters/override_args.py",
         "custom_getters/restore_initializer.py",
         "custom_getters/stop_gradient.py",
     ],
     srcs_version = "PY2AND3",
     deps = [
+        # six dep,
         # tensorflow dep,
+        # tensorflow_probability dep,
     ],
 )
 
@@ -63,7 +69,6 @@ py_library(
         "modules/clip_gradient.py",
         "modules/conv.py",
         "modules/embed.py",
-        "modules/experimental.py",
         "modules/gated_rnn.py",
         "modules/layer_norm.py",
         "modules/nets/__init__.py",
@@ -71,7 +76,9 @@ py_library(
         "modules/nets/convnet.py",
         "modules/nets/dilation.py",
         "modules/nets/mlp.py",
+        "modules/nets/vqvae.py",
         "modules/pondering_rnn.py",
+        "modules/relational_memory.py",
         "modules/residual.py",
         "modules/rnn_core.py",
         "modules/scale_gradient.py",
@@ -82,8 +89,12 @@ py_library(
     deps = [
         ":base",
         ":basic",
+        ":nest",
         ":util",
+        # numpy dep,
+        # six dep,
         # tensorflow dep,
+        # wrapt dep,
     ],
 )
 
@@ -92,7 +103,10 @@ py_library(
     srcs = ["modules/util.py"],
     srcs_version = "PY2AND3",
     deps = [
+        # contextlib2 dep,
+        # six dep,
         # tensorflow dep,
+        # wrapt dep,
     ],
 )
 
@@ -135,24 +149,26 @@ module_tests = [
     ("base_info_test", "", "small"),
     ("basic_test", "", "small"),
     ("basic_rnn_test", "", "medium"),
-    ("batch_norm_test", "", "small"),
+    ("batch_norm_test", "", "medium"),
     ("batch_norm_v2_test", "", "small"),
     ("layer_norm_test", "", "small"),
     ("block_matrix_test", "", "small"),
     ("clip_gradient_test", "", "small"),
-    ("convnet_test", "nets/", "small"),
+    ("convnet_test", "nets/", "medium"),
     ("conv_test", "", "large"),
-    ("dilation_test", "nets/", "small"),
+    ("dilation_test", "nets/", "medium"),
     ("embed_test", "", "small"),
     ("gated_rnn_test", "", "medium"),
     ("mlp_test", "nets/", "small"),
     ("pondering_rnn_test", "", "small"),
+    ("relational_memory_test", "", "medium"),
     ("rnn_core_test", "", "small"),
     ("residual_test", "", "small"),
     ("scale_gradient_test", "", "small"),
     ("sequential_test", "", "small"),
     ("spatial_transformer_test", "", "small"),
     ("util_test", "", "small"),
+    ("vqvae_test", "nets/", "small"),
 ]
 
 [py_test(
@@ -223,6 +239,11 @@ custom_getters_tests = [
     ),
     (
         "non_trainable_test",
+        "small",
+        [],
+    ),
+    (
+        "override_args_test",
         "small",
         [],
     ),

@@ -33,9 +33,10 @@ from six.moves import xrange  # pylint: disable=redefined-builtin
 from sonnet.python.modules import base
 from sonnet.python.modules import basic
 import tensorflow as tf
+import wrapt
 
 from tensorflow.python.ops import rnn_cell_impl
-from tensorflow.python.util import nest
+nest = tf.contrib.framework.nest
 
 
 def _single_learnable_state(state, state_id=0, learnable=True):
@@ -171,8 +172,7 @@ class RNNCore(base.AbstractModule):
   This class defines the basic functionality that every core should implement,
   mainly the `initial_state` method which will return an example of their
   initial state.
-  It also inherits from the two interfaces it should be compatible with, which
-  are `snt.Module` and `tf.contrib.rnn.RNNCell`.
+  It also inherits from the interface `snt.AbstractModule`.
 
   As with any other `snt.Module` any subclass must implement a `_build` method
   that constructs the graph that corresponds to a core. Such a `_build` method
@@ -187,10 +187,10 @@ class RNNCore(base.AbstractModule):
       element = tuple(element*) | list(element*) | tf.Tensor
 
   This class is to be used with tensorflow containers such as `rnn` in
-  tensorflow.python.ops.rnn. These containers only accept
-  `tf.contrib.rnn.RNNCell` objects, hence the need to comply with its interface.
-  This way, all the RNNCores should expose a `state_size` and `output_size`
-  properties.
+  tensorflow.python.ops.rnn.
+  These containers only accept inputs which are compatible with the
+  `tf.contrib.rnn.RNNCell` API, so that all the RNNCores should expose
+  `state_size` and `output_size` properties.
   """
   __metaclass__ = abc.ABCMeta
 
@@ -345,3 +345,84 @@ class TrainableInitialState(base.AbstractModule):
 
     return nest.pack_sequence_as(structure=self._initial_state,
                                  flat_sequence=flat_learnable_state)
+
+
+class RNNCellWrapper(RNNCore):
+  """RNN core that delegates to a `tf.contrib.rnn.RNNCell`."""
+
+  def __init__(self, cell_ctor, *args, **kwargs):
+    """Constructs the cell, within this module's variable scope.
+
+    Args:
+      cell_ctor: Callable that instantiates a `tf.contrib.rnn.RNNCell`.
+      *args: Arguments to pass to `cell_ctor`.
+      **kwargs: Keyword arguments to pass to `cell_ctor`.
+        If `name` is provided, it is passed to `RNNCore.__init__` as well.
+        If `custom_getter` is provided, it is passed to `RNNCore.__init__`
+        but not to `cell_ctor`.
+    """
+    super(RNNCellWrapper, self).__init__(
+        name=kwargs.get("name"),
+        custom_getter=kwargs.pop("custom_getter", None))
+
+    with self._enter_variable_scope():
+      self._cell = cell_ctor(*args, **kwargs)
+
+  def _build(self, inputs, prev_state):
+    return self._cell(inputs, prev_state)
+
+  @property
+  def output_size(self):
+    return self._cell.output_size
+
+  @property
+  def state_size(self):
+    return self._cell.state_size
+
+
+def with_doc(fn_with_doc_to_copy):
+  """Returns a decorator to copy documentation from the given function.
+
+  Docstring is copied, including *args and **kwargs documentation.
+
+  Args:
+    fn_with_doc_to_copy: Function whose docstring, including *args and
+      **kwargs documentation, is to be copied.
+
+  Returns:
+    Decorated version of `wrapper_init` with documentation copied from
+    `fn_with_doc_to_copy`.
+  """
+
+  def decorator(wrapper_init):
+    # Wrap the target class's constructor (to assume its docstring),
+    # but invoke the wrapper class's constructor.
+    @wrapt.decorator
+    def wrapping_fn(unused_wrapped, instance, args, kwargs):
+      wrapper_init(instance, *args, **kwargs)
+    return wrapping_fn(fn_with_doc_to_copy)  # pylint: disable=no-value-for-parameter
+
+  return decorator
+
+
+def wrap_rnn_cell_class(wrapped_class):
+  """Wraps an RNN cell class with a sub-class of `RNNCellWrapper`.
+
+  The returned wrapper class will contain an `__init__` method whose
+  docstring, *args, and **kwargs are based on `wrapped_class.__init__`.
+
+  Args:
+    wrapped_class: A sub-class (NOT an instance) of `tf.contrib.rnn.RNNCell`.
+
+  Returns:
+    A sub-class (NOT an instance) of `RNNCellWrapper`, with an `__init__`
+    method that delegates to that of `wrapped_class`.
+  """
+
+  class Wrapper(RNNCellWrapper):
+
+    @with_doc(wrapped_class.__init__)
+    def __init__(self, *args, **kwargs):
+      super(Wrapper, self).__init__(wrapped_class, *args, **kwargs)
+
+  return Wrapper

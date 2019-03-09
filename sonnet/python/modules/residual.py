@@ -23,7 +23,7 @@ from sonnet.python.modules import base
 from sonnet.python.modules import rnn_core
 import tensorflow as tf
 
-from tensorflow.python.util import nest
+nest = tf.contrib.framework.nest
 
 
 class Residual(base.AbstractModule):
@@ -38,8 +38,8 @@ class Residual(base.AbstractModule):
 
     self._base_module = base_module
 
-  def _build(self, inputs):
-    outputs = self._base_module(inputs)
+  def _build(self, inputs, **kwargs):
+    outputs = self._base_module(inputs, **kwargs)
     residual = nest.map_structure(lambda inp, out: inp + out, inputs, outputs)
     return residual
 
@@ -55,8 +55,8 @@ class ResidualCore(rnn_core.RNNCore):
     super(ResidualCore, self).__init__(name=name)
     self._base_core = base_core
 
-  def _build(self, inputs, prev_state):
-    outputs, new_state = self._base_core(inputs, prev_state)
+  def _build(self, inputs, prev_state, **kwargs):
+    outputs, new_state = self._base_core(inputs, prev_state, **kwargs)
     residual = nest.map_structure(lambda inp, out: inp + out, inputs, outputs)
     return residual, new_state
 
@@ -68,11 +68,19 @@ class ResidualCore(rnn_core.RNNCore):
   def state_size(self):
     return self._base_core.state_size
 
+  def initial_state(self, *args, **kwargs):
+    return self._base_core.initial_state(*args, **kwargs)
+
+  def zero_state(self, *args, **kwargs):
+    return self._base_core.zero_state(*args, **kwargs)
+
 
 class SkipConnectionCore(rnn_core.RNNCore):
   """Adds a skip connection to the base RNN core.
 
-  This concatenates the input to the output of the base core.
+  The output of the wrapped core is the concatenation of the output of the base
+  core with its input. The state of the wrapped core is the state of the base
+  core.
   """
 
   def __init__(self, base_core, input_shape=None, name="skip_connection_core"):
@@ -87,10 +95,10 @@ class SkipConnectionCore(rnn_core.RNNCore):
     self._base_core = base_core
     self._input_shape = input_shape
 
-  def _build(self, inputs, prev_state):
+  def _build(self, inputs, prev_state, **kwargs):
     if not self._input_shape:
       self._input_shape = inputs.get_shape()[1:]
-    outputs, new_state = self._base_core(inputs, prev_state)
+    outputs, new_state = self._base_core(inputs, prev_state, **kwargs)
 
     outputs = nest.map_structure(lambda inp, out: tf.concat((inp, out), -1),
                                  inputs, outputs)
@@ -114,3 +122,9 @@ class SkipConnectionCore(rnn_core.RNNCore):
   @property
   def state_size(self):
     return self._base_core.state_size
+
+  def initial_state(self, *args, **kwargs):
+    return self._base_core.initial_state(*args, **kwargs)
+
+  def zero_state(self, *args, **kwargs):
+    return self._base_core.zero_state(*args, **kwargs)

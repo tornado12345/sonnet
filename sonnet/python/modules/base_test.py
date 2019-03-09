@@ -20,14 +20,18 @@ from __future__ import division
 from __future__ import print_function
 
 import functools
+import inspect
 import pickle
 
 # Dependency imports
+from absl.testing import parameterized
 import numpy as np
 import six
 from sonnet.python.modules import base
+from sonnet.python.modules.base_errors import NotSupportedError
 import tensorflow as tf
 
+tfe = tf.contrib.eager
 logging = tf.logging
 
 
@@ -85,6 +89,7 @@ class SimpleModule(base.AbstractModule):
       self._b = tf.get_variable("b", dtype=tf.float32, shape=[10, 10])
 
   def _build(self, inputs):
+    """Connect a simple module to the graph."""
     self._w = tf.get_variable("w", dtype=tf.float32, shape=[10, 10])
 
     return self._w * inputs + self._b
@@ -126,15 +131,18 @@ class ModuleWithSubmodules(base.AbstractModule):
     return d(self._submodule_a(inputs)) +  self._submodule_b(c(inputs))  # pylint: disable=not-callable
 
 
-class AbstractModuleTest(tf.test.TestCase):
+# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+class AbstractModuleTest(parameterized.TestCase, tf.test.TestCase):
 
   def testInitializerKeys(self):
     keys = ModuleWithClassKeys.get_possible_initializer_keys()
     self.assertEqual(keys, {"foo", "bar"})
     keys = ModuleWithNoInitializerKeys.get_possible_initializer_keys()
     self.assertEqual(keys, set())
-    msg = ("missing 1 required positional argument" if six.PY3
-           else "takes exactly 2 arguments")
+    if six.PY2:
+      msg = "takes exactly 2 arguments"
+    else:
+      msg = "missing 1 required positional argument"
     self.assertRaisesRegexp(
         TypeError, msg,
         ModuleWithCustomInitializerKeys.get_possible_initializer_keys)
@@ -148,34 +156,50 @@ class AbstractModuleTest(tf.test.TestCase):
     # gpylint incorrectly thinks IdentityModule is not callable, so disable.
     # pylint: disable=not-callable
     with tf.Graph().as_default() as graph:
-      id_mod(tf.placeholder(dtype=tf.float32, shape=[42]))
+      id_mod(tf.ones(dtype=tf.float32, shape=[42]))
       self.assertEqual(id_mod._graph, graph)
 
     with tf.Graph().as_default():
       with self.assertRaisesRegexp(base.DifferentGraphError,
                                    "Cannot connect module"):
-        id_mod(tf.placeholder(dtype=tf.float32, shape=[42]))
+        id_mod(tf.ones(dtype=tf.float32, shape=[42]))
     # pylint: enable=not-callable
 
   def testNameScopeRecording(self):
+    if tf.executing_eagerly():
+      self.skipTest("Name scopes are not recorded in eager mode.")
+
     id_mod = IdentityModule(name="foo")
 
     # Connect inside different name scope contexts, check that each is recorded.
     # pylint: disable=not-callable
-    id_mod(tf.placeholder(dtype=tf.float32, shape=[22]))
+    id_mod(tf.ones(dtype=tf.float32, shape=[22]))
     self.assertIn(id_mod.name_scopes, (("foo",), ("foo_1",)))
     with tf.name_scope("blah"):
-      id_mod(tf.placeholder(dtype=tf.float32, shape=[23]))
+      id_mod(tf.ones(dtype=tf.float32, shape=[23]))
     self.assertIn(id_mod.name_scopes,
                   (("foo", "blah/foo"), ("foo_1", "blah/foo")))
     with tf.name_scope("baz"):
-      id_mod(tf.placeholder(dtype=tf.float32, shape=[24]))
+      id_mod(tf.ones(dtype=tf.float32, shape=[24]))
     # pylint: enable=not-callable
     self.assertIn(id_mod.name_scopes,
                   (("foo", "blah/foo", "baz/foo"),
                    ("foo_1", "blah/foo", "baz/foo")))
 
+  def testNameScopeRecordingNotSupportedEager(self):
+    if not tf.executing_eagerly():
+      self.skipTest("Name scopes are recorded in graph mode.")
+
+    id_mod = IdentityModule(name="foo")
+    id_mod(tf.ones(dtype=tf.float32, shape=[22]))
+    with self.assertRaisesRegexp(base.NotSupportedError,
+                                 "not supported in eager"):
+      id_mod.name_scopes  # pylint: disable=pointless-statement
+
   def testSubgraphsRecording(self):
+    if tf.executing_eagerly():
+      self.skipTest("Subgraphs are not recorded in eager mode.")
+
     id_mod = IdentityModule(name="foo")
 
     with self.assertRaisesRegexp(base.NotConnectedError,
@@ -183,13 +207,13 @@ class AbstractModuleTest(tf.test.TestCase):
       id_mod.last_connected_subgraph()
 
     # pylint: disable=not-callable
-    inputs = tf.placeholder(dtype=tf.float32, shape=[21])
+    inputs = tf.ones(dtype=tf.float32, shape=[21])
     outputs = id_mod(inputs)
     with tf.name_scope("blah"):
-      blah_inputs = tf.placeholder(dtype=tf.float32, shape=[22])
+      blah_inputs = tf.ones(dtype=tf.float32, shape=[22])
       blah_outputs = id_mod(blah_inputs)
     with tf.name_scope("baz"):
-      baz_inputs = tf.placeholder(dtype=tf.float32, shape=[23])
+      baz_inputs = tf.ones(dtype=tf.float32, shape=[23])
       baz_outputs = id_mod(baz_inputs)
     # pylint: enable=not-callable
     subgraphs = id_mod.connected_subgraphs
@@ -205,6 +229,31 @@ class AbstractModuleTest(tf.test.TestCase):
     self.assertIs(subgraphs[0].outputs, outputs)
     self.assertIs(subgraphs[1].outputs, blah_outputs)
     self.assertIs(subgraphs[2].outputs, baz_outputs)
+
+  def testSubgraphsNotRecordedEager(self):
+    if not tf.executing_eagerly():
+      self.skipTest("Subgraphs are recorded in graph mode")
+
+    id_mod = IdentityModule(name="foo")
+
+    with self.assertRaisesRegexp(base.NotSupportedError,
+                                 "not tracked in eager mode"):
+      id_mod.last_connected_subgraph()
+
+    # pylint: disable=not-callable
+    inputs = tf.ones(dtype=tf.float32, shape=[21])
+    id_mod(inputs)
+    with tf.name_scope("blah"):
+      blah_inputs = tf.ones(dtype=tf.float32, shape=[22])
+      id_mod(blah_inputs)
+    with tf.name_scope("baz"):
+      baz_inputs = tf.ones(dtype=tf.float32, shape=[23])
+      id_mod(baz_inputs)
+    # pylint: enable=not-callable
+
+    with self.assertRaisesRegexp(base.NotSupportedError,
+                                 "not tracked in eager mode"):
+      id_mod.connected_subgraphs  # pylint: disable=pointless-statement
 
   def testInitNoNamedArgs(self):
     """Tests if calling __init__ without named args raises a ValueError."""
@@ -241,7 +290,7 @@ class AbstractModuleTest(tf.test.TestCase):
       connection_count["x"] += 1
       return getter(name, *args, **kwargs)
 
-    inputs = tf.placeholder(tf.float32, [10, 10])
+    inputs = tf.ones(dtype=tf.float32, shape=[10, 10])
 
     with tf.variable_scope("scope"):
       module = SimpleModule(name="mod1")
@@ -283,56 +332,61 @@ class AbstractModuleTest(tf.test.TestCase):
       kwargs["trainable"] = False
       return getter(name, *args, **kwargs)
 
-    inputs = tf.placeholder(tf.float32, [10, 10])
+    inputs = tf.ones(dtype=tf.float32, shape=[10, 10])
 
     with tf.variable_scope("scope"):
       module = ComplexModule(name="mod1")
       module(inputs)  # pylint: disable=not-callable
-      self.assertEqual(4, len(tf.trainable_variables()))
+      self.assertLen(tf.trainable_variables(), 4)
 
       module = ComplexModule(custom_getter=custom_getter, name="mod2")
       module(inputs)  # pylint: disable=not-callable
-      self.assertEqual(4, len(tf.trainable_variables()))  # All variables.
+      self.assertLen(tf.trainable_variables(), 4)  # All variables.
 
       module = ComplexModule(custom_getter={".*/w": custom_getter},
                              name="mod3")
       module(inputs)  # pylint: disable=not-callable
-      trainable_names = [v.op.name for v in tf.trainable_variables()]
-      self.assertEqual(6, len(trainable_names))  # linear_1/w and linear_2/w.
-      self.assertIn("scope/mod3/linear_1/b", trainable_names)
-      self.assertIn("scope/mod3/linear_2/b", trainable_names)
+      trainable_names = [v.name for v in tf.trainable_variables()]
+      self.assertLen(trainable_names, 6)  # linear_1/w and linear_2/w.
+      self.assertIn("scope/mod3/linear_1/b:0", trainable_names)
+      self.assertIn("scope/mod3/linear_2/b:0", trainable_names)
 
       module = ComplexModule(custom_getter={".*/b": custom_getter}, name="mod4")
       module(inputs)  # pylint: disable=not-callable
-      trainable_names = [v.op.name for v in tf.trainable_variables()]
-      self.assertEqual(8, len(trainable_names))  # linear_1/b and linear_2/b.
-      self.assertIn("scope/mod4/linear_1/w", trainable_names)
-      self.assertIn("scope/mod4/linear_2/w", trainable_names)
+      trainable_names = [v.name for v in tf.trainable_variables()]
+      self.assertLen(trainable_names, 8)  # linear_1/b and linear_2/b.
+      self.assertIn("scope/mod4/linear_1/w:0", trainable_names)
+      self.assertIn("scope/mod4/linear_2/w:0", trainable_names)
 
       module = ComplexModule(custom_getter={".*": custom_getter}, name="mod5")
       module(inputs)  # pylint: disable=not-callable
-      self.assertEqual(8, len(tf.trainable_variables()))  # All variables.
+      self.assertLen(tf.trainable_variables(), 8)  # All variables.
 
       module = ComplexModule(custom_getter={"w": custom_getter}, name="mod6")
       module(inputs)  # pylint: disable=not-callable
-      self.assertEqual(12, len(tf.trainable_variables()))  # No variables.
+      self.assertLen(tf.trainable_variables(), 12)  # No variables.
 
-  def testGetAllVariables(self):
-    inputs = tf.placeholder(tf.float32, [10, 10])
+  @parameterized.parameters(
+      [lambda m: m.get_all_variables(),
+       lambda m: m.variables,
+       lambda m: m.trainable_variables]
+  )
+  def testGetAllTrainableVariables(self, all_trainable_variables):
+    inputs = tf.ones(dtype=tf.float32, shape=[10, 10])
     submodule_a = SimpleModule(name="simple_submodule")
     submodule_b = ComplexModule(name="complex_submodule")
     module = ModuleWithSubmodules(
         submodule_a=submodule_a, submodule_b=submodule_b)
     with self.assertRaisesRegexp(base.NotConnectedError,
                                  "not instantiated yet"):
-      module.get_all_variables()
+      all_trainable_variables(module)
     module(inputs)  # pylint: disable=not-callable
 
     # Check correct for SimpleModule.
     submodule_a_variables = submodule_a.get_variables()
     submodule_a_variable_names = sorted(
         [str(v.name) for v in submodule_a_variables])
-    submodule_a_all_variables = submodule_a.get_all_variables()
+    submodule_a_all_variables = all_trainable_variables(submodule_a)
     submodule_a_all_variable_names = sorted(
         [str(v.name) for v in submodule_a_all_variables])
     self.assertEqual(submodule_a_variable_names, submodule_a_all_variable_names)
@@ -342,7 +396,7 @@ class AbstractModuleTest(tf.test.TestCase):
     ], submodule_a_variable_names)
 
     # Check correct for ComplexModule
-    submodule_b_variables = submodule_b.get_all_variables()
+    submodule_b_variables = all_trainable_variables(submodule_b)
     submodule_b_variable_names = sorted(
         [str(v.name) for v in submodule_b_variables])
     self.assertEqual([
@@ -352,7 +406,7 @@ class AbstractModuleTest(tf.test.TestCase):
         "complex_submodule/linear_2/w:0",
     ], submodule_b_variable_names)
 
-    all_variables = module.get_all_variables()
+    all_variables = all_trainable_variables(module)
     all_variable_names = sorted([str(v.name) for v in all_variables])
     self.assertEqual([
         "complex_submodule/linear_1/b:0",
@@ -369,16 +423,15 @@ class AbstractModuleTest(tf.test.TestCase):
         "simple_submodule/w:0",
     ], all_variable_names)
 
-    self.assertEqual(
-        0,
-        len(module.get_all_variables(collection=tf.GraphKeys.LOCAL_VARIABLES)))
+    self.assertEmpty(
+        module.get_all_variables(collection=tf.GraphKeys.LOCAL_VARIABLES))
 
     # Create another ModuleWithSubmodules with the same submodules
     module = ModuleWithSubmodules(
         submodule_a=submodule_a, submodule_b=submodule_b)
     module(inputs)  # pylint: disable=not-callable
 
-    all_variables = module.get_all_variables()
+    all_variables = all_trainable_variables(module)
     all_variable_names = sorted([str(v.name) for v in all_variables])
     self.assertEqual([
         "complex_submodule/linear_1/b:0",
@@ -395,7 +448,10 @@ class AbstractModuleTest(tf.test.TestCase):
         "simple_submodule/w:0",
     ], all_variable_names)
 
-  def testGetAllLocalVariables(self):
+  @parameterized.parameters(
+      [lambda m: m.get_all_variables(tf.GraphKeys.LOCAL_VARIABLES),
+       lambda m: m.non_trainable_variables])
+  def testGetAllLocalVariables(self, get_non_trainable_variables):
     def local_custom_getter(getter, *args, **kwargs):
       kwargs["trainable"] = False
       if "collections" in kwargs and kwargs["collections"] is not None:
@@ -404,7 +460,7 @@ class AbstractModuleTest(tf.test.TestCase):
         kwargs["collections"] = [tf.GraphKeys.LOCAL_VARIABLES]
       return getter(*args, **kwargs)
 
-    inputs = tf.placeholder(tf.float32, [10, 10])
+    inputs = tf.ones(dtype=tf.float32, shape=[10, 10])
     # Create a new ModuleWithSubmodules that uses all local variables
     with tf.variable_scope("", custom_getter=local_custom_getter):
       submodule_a = SimpleModule(name="simple_submodule")
@@ -413,14 +469,11 @@ class AbstractModuleTest(tf.test.TestCase):
           submodule_a=submodule_a, submodule_b=submodule_b)
     local_module(inputs)  # pylint: disable=not-callable
 
-    self.assertEqual(
-        0,
-        len(local_module.get_all_variables()))
-    self.assertEqual(0, len(tf.all_variables()))
-    self.assertEqual(12, len(tf.local_variables()))
+    self.assertEmpty(local_module.get_all_variables())
+    self.assertEmpty(tf.all_variables())
+    self.assertLen(tf.local_variables(), 12)
 
-    all_variables = local_module.get_all_variables(
-        collection=tf.GraphKeys.LOCAL_VARIABLES)
+    all_variables = get_non_trainable_variables(local_module)
     all_variable_names = sorted([str(v.name) for v in all_variables])
     self.assertEqual([
         "complex_submodule/linear_1/b:0",
@@ -438,22 +491,51 @@ class AbstractModuleTest(tf.test.TestCase):
     ], all_variable_names)
 
   def testGetAllVariablesWithConditionalConstruction(self):
-    inputs = tf.placeholder(tf.float32, [10, 10])
+    inputs = tf.ones(dtype=tf.float32, shape=[10, 10])
     cond = tf.constant(0.)
     module_a = SimpleModule(name="module_a")
     module_b = SimpleModule(name="module_b")
 
     _ = tf.cond(cond > 0, lambda: module_a(inputs), lambda: module_b(inputs))  # pylint: disable=not-callable
 
-    # check module_a
-    all_variables = module_a.get_all_variables()
-    all_variable_names = sorted([str(v.name) for v in all_variables])
-    self.assertEqual(["module_a/b:0", "module_a/w:0"], all_variable_names)
+    if tf.executing_eagerly():
+      # In eager mode only the true branch is taken.
+      msg = "module_a not instantiated yet"
+      with self.assertRaisesRegexp(base.NotConnectedError, msg):
+        module_a.get_all_variables()
+    else:
+      # check module_a
+      all_variables = module_a.get_all_variables()
+      all_variable_names = sorted([str(v.name) for v in all_variables])
+      self.assertEqual(["module_a/b:0", "module_a/w:0"], all_variable_names)
 
     # check module_b
     all_variables = module_b.get_all_variables()
     all_variable_names = sorted([str(v.name) for v in all_variables])
     self.assertEqual(["module_b/b:0", "module_b/w:0"], all_variable_names)
+
+  @parameterized.parameters(None, "", "complex_module")
+  def testVariablesFromNestedModule(self, name):
+    outer = ComplexModule(name=name)
+    outer(tf.zeros([10, 10]))
+    inner1 = outer._b
+    outer(tf.zeros([10, 10]))
+    inner2 = outer._b
+
+    # Calling the outer module triggers the inner module to re-constructed. The
+    # new inner module should have literally the same variables as the old one.
+    self.assertIsNot(inner1, inner2)
+    self.assertNotEmpty(inner1.variables)
+    self.assertLen(inner2.variables, len(inner1.variables))
+    for v1, v2 in zip(inner1.variables, inner2.variables):
+      self.assertIs(v1, v2)
+
+  def testCallSignatureAndDocstring(self):
+    my_module = SimpleModule()
+    self.assertEqual(
+        inspect.getargspec(my_module.__call__),
+        inspect.getargspec(my_module._build))
+    self.assertEqual(my_module.__call__.__doc__, my_module._build.__doc__)
 
 
 def _make_model_with_params(inputs, output_size):
@@ -462,6 +544,7 @@ def _make_model_with_params(inputs, output_size):
   return tf.matmul(inputs, weight)
 
 
+# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
 class ModuleTest(tf.test.TestCase):
 
   def testFunctionType(self):
@@ -473,23 +556,19 @@ class ModuleTest(tf.test.TestCase):
   def testSharing(self):
     batch_size = 3
     in_size = 4
-    inputs1 = tf.placeholder(tf.float32, shape=[batch_size, in_size])
-    inputs2 = tf.placeholder(tf.float32, shape=[batch_size, in_size])
+    input_data = np.random.rand(batch_size, in_size)
+    inputs1 = tf.constant(input_data)
+    inputs2 = tf.constant(input_data)
 
     build = functools.partial(_make_model_with_params, output_size=10)
     model = base.Module(build)
     self.assertEqual(model.scope_name, "make_model_with_params")
     outputs1 = model(inputs1)
     outputs2 = model(inputs2)
-    input_data = np.random.rand(batch_size, in_size)
 
-    with self.test_session() as sess:
-      sess.run(tf.global_variables_initializer())
-      outputs1, outputs2 = sess.run(
-          [outputs1, outputs2],
-          feed_dict={inputs1: input_data,
-                     inputs2: input_data})
-      self.assertAllClose(outputs1, outputs2)
+    self.evaluate(tf.global_variables_initializer())
+    outputs1, outputs2 = self.evaluate([outputs1, outputs2])
+    self.assertAllClose(outputs1, outputs2)
 
   def testCustomGetter(self):
     def simple_module_build(inputs):
@@ -505,7 +584,7 @@ class ModuleTest(tf.test.TestCase):
 
     create_module = functools.partial(base.Module, build=simple_module_build)
 
-    inputs = tf.placeholder(tf.float32, [10, 10])
+    inputs = tf.ones(dtype=tf.float32, shape=[10, 10])
 
     with tf.variable_scope("scope"):
       module = create_module(name="mod1")
@@ -564,6 +643,111 @@ class ModuleTest(tf.test.TestCase):
     self.assertNotEqual(id_a.graph, id_c.graph)
     self.assertEqual(id_c.graph, graph_2)
 
+
+class ConnectionObserverTest(tf.test.TestCase):
+
+  def _connection_observer(self, subgraph):
+    self._connected_subgraphs.append(subgraph)
+
+  def setUp(self):
+    self._inputs = tf.zeros(shape=(10, 10), dtype=tf.float32)
+    self._connected_subgraphs = []
+
+  def testObservesWrappedFunction(self):
+    activation_module = base.Module(tf.nn.relu)
+    with base.observe_connections(self._connection_observer):
+      outputs = activation_module(self._inputs)
+
+    self.assertEqual(1, len(self._connected_subgraphs))
+
+    self.assertIs(activation_module, self._connected_subgraphs[0].module)
+    self.assertIs(self._inputs, self._connected_subgraphs[0].inputs["args"][0])
+    self.assertIs(self._connected_subgraphs[0].outputs, outputs)
+
+  def testObservesSimpleModule(self):
+    simple_module = SimpleModule()
+    with base.observe_connections(self._connection_observer):
+      outputs = simple_module(self._inputs)
+
+    self.assertEqual(1, len(self._connected_subgraphs))
+
+    self.assertIs(simple_module, self._connected_subgraphs[0].module)
+    self.assertIs(self._inputs, self._connected_subgraphs[0].inputs["inputs"])
+    self.assertIs(self._connected_subgraphs[0].outputs, outputs)
+
+  def testObservesComplexModule(self):
+    complex_module = ComplexModule()
+    with base.observe_connections(self._connection_observer):
+      outputs = complex_module(self._inputs)
+
+    self.assertEqual(3, len(self._connected_subgraphs))
+
+    self.assertIsInstance(self._connected_subgraphs[0].module, SimpleModule)
+    self.assertIs(self._inputs, self._connected_subgraphs[0].inputs["inputs"])
+
+    self.assertIsInstance(self._connected_subgraphs[1].module, SimpleModule)
+    self.assertIs(self._connected_subgraphs[0].outputs,
+                  self._connected_subgraphs[1].inputs["inputs"])
+    self.assertIs(self._connected_subgraphs[1].outputs, outputs)
+
+    self.assertIs(complex_module, self._connected_subgraphs[2].module)
+    self.assertIs(self._connected_subgraphs[2].outputs, outputs)
+
+
+class MatMulModule(base.AbstractModule):
+
+  call_count = 0
+
+  def _build(self, x):
+    self.call_count += 1
+    self.w = tf.get_variable("w", [x.shape[1], 32])
+    return x * self.w
+
+
+# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+class DefunTest(tf.test.TestCase):
+
+  def testDefunWrappedProperty(self):
+    module = MatMulModule()
+    self.assertFalse(module.defun_wrapped)
+    for _ in range(2):
+      module.defun()
+      self.assertTrue(module.defun_wrapped)
+
+  def testCallWithDefun(self):
+    module = MatMulModule()
+    module.defun()
+    batch_size = 10
+    output = module(tf.zeros([batch_size, 1]))
+    self.assertListEqual(output.shape.as_list(), [batch_size, 32])
+
+  def testCallWithDefunTracingTwice(self):
+    module = MatMulModule()
+    module.defun()
+
+    batch_size = 10
+    for _ in range(2):
+      output = module(tf.zeros([batch_size, 1]))
+      self.assertListEqual(output.shape.as_list(), [batch_size, 32])
+    self.assertEqual(module.call_count, 1)
+
+    # Calling with a different batch_size causes `defun` to re-trace our module.
+    batch_size *= 2
+    for _ in range(2):
+      output = module(tf.zeros([batch_size, 1]))
+      self.assertListEqual(output.shape.as_list(), [batch_size, 32])
+    self.assertEqual(module.call_count, 2)
+
+  def testGetVariablesDisabledWhenUsingDefun(self):
+    module = MatMulModule()
+    module.defun()
+    module(tf.zeros([1, 1]))
+    if tf.executing_eagerly():
+      msg = ".*get_variables.*not supported .* wrapped with defun"
+      with self.assertRaisesRegexp(NotSupportedError, msg):
+        module.get_variables()
+    else:
+      self.assertEqual(module.get_variables(), (module.w,))
 
 if __name__ == "__main__":
   tf.test.main()

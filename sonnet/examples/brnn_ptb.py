@@ -40,6 +40,7 @@ import sonnet as snt
 from sonnet.examples import ptb_reader
 import sonnet.python.custom_getters.bayes_by_backprop as bbb
 import tensorflow as tf
+import tensorflow_probability as tfp
 
 nest = tf.contrib.framework.nest
 FLAGS = tf.flags.FLAGS
@@ -87,6 +88,7 @@ def _run_session_with_no_hooks(sess, *args, **kwargs):
 
 
 def _get_raw_data(subset):
+  """Loads the data or reads it from cache."""
   raw_data = _LOADED.get(subset)
   if raw_data is not None:
     return raw_data, _LOADED["vocab"]
@@ -161,14 +163,15 @@ class GlobalNormClippingOptimizer(tf.train.Optimizer):
 
 
 class CustomScaleMixture(object):
+  """A convenience class for the scale mixture."""
 
   def __init__(self, pi, sigma1, sigma2):
     self.mu, self.pi, self.sigma1, self.sigma2 = map(
         np.float32, (0.0, pi, sigma1, sigma2))
 
   def log_prob(self, x):
-    n1 = tf.contrib.distributions.Normal(self.mu, self.sigma1)
-    n2 = tf.contrib.distributions.Normal(self.mu, self.sigma2)
+    n1 = tfp.distributions.Normal(self.mu, self.sigma1)
+    n2 = tfp.distributions.Normal(self.mu, self.sigma2)
     mix1 = tf.reduce_sum(n1.log_prob(x), -1) + tf.log(self.pi)
     mix2 = tf.reduce_sum(n2.log_prob(x), -1) + tf.log(np.float32(1.0 - self.pi))
     prior_mix = tf.stack([mix1, mix2])
@@ -189,7 +192,7 @@ def custom_scale_mixture_prior_builder(getter, name, *args, **kwargs):
     **kwargs: Keyword arguments forwarded by `tf.get_variable`.
 
   Returns:
-    An instance of `tf.contrib.distributions.Distribution` representing the
+    An instance of `tfp.distributions.Distribution` representing the
     prior distribution over the variable in question.
   """
   # This specific prior formulation doesn't need any of the arguments forwarded
@@ -213,11 +216,11 @@ def lstm_posterior_builder(getter, name, *args, **kwargs):
     **kwargs: Keyword arguments forwarded by `tf.get_variable`.
 
   Returns:
-    An instance of `tf.contrib.distributions.Distribution` representing the
+    An instance of `tfp.distributions.Distribution` representing the
     posterior distribution over the variable in question.
   """
   del args
-  parameter_shapes = tf.contrib.distributions.Normal.param_static_shapes(
+  parameter_shapes = tfp.distributions.Normal.param_static_shapes(
       kwargs["shape"])
 
   # The standard deviation of the scale mixture prior.
@@ -237,7 +240,7 @@ def lstm_posterior_builder(getter, name, *args, **kwargs):
           maxval=np.log(np.exp(prior_stddev / 2.0) - 1.0),
           dtype=tf.float32,
           shape=parameter_shapes["scale"]))
-  return tf.contrib.distributions.Normal(
+  return tfp.distributions.Normal(
       loc=loc_var,
       scale=tf.nn.softplus(scale_var) + 1e-5,
       name="{}/posterior_dist".format(name))
@@ -254,11 +257,11 @@ def non_lstm_posterior_builder(getter, name, *args, **kwargs):
     **kwargs: Keyword arguments forwarded by `tf.get_variable`.
 
   Returns:
-    An instance of `tf.contrib.distributions.Distribution` representing the
+    An instance of `tfp.distributions.Distribution` representing the
     posterior distribution over the variable in question.
   """
   del args
-  parameter_shapes = tf.contrib.distributions.Normal.param_static_shapes(
+  parameter_shapes = tfp.distributions.Normal.param_static_shapes(
       kwargs["shape"])
 
   # The standard deviation of the scale mixture prior.
@@ -278,7 +281,7 @@ def non_lstm_posterior_builder(getter, name, *args, **kwargs):
           maxval=np.log(np.exp(prior_stddev / 1.0) - 1.0),
           dtype=tf.float32,
           shape=parameter_shapes["scale"]))
-  return tf.contrib.distributions.Normal(
+  return tfp.distributions.Normal(
       loc=loc_var,
       scale=tf.nn.softplus(scale_var) + 1e-5,
       name="{}/posterior_dist".format(name))
@@ -347,7 +350,7 @@ def build_logits(data_ops, embed_layer, rnn_core, output_linear, name_prefix):
 
   # Construct variables for holding the RNN state.
   initial_rnn_state = nest.map_structure(
-      lambda t: tf.get_local_variable(  # pylint: disable=g-long-lambda
+      lambda t: tf.get_local_variable(  # pylint: disable long lambda warning
           "{}/rnn_state/{}".format(name_prefix, t.op.name), initializer=t),
       rnn_core.initial_state(FLAGS.batch_size))
   assign_zero_rnn_state = nest.map_structure(
