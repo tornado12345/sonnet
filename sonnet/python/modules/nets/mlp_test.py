@@ -22,10 +22,12 @@ from __future__ import print_function
 from absl.testing import parameterized
 import numpy as np
 import sonnet as snt
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+from tensorflow.contrib import layers as contrib_layers
+from tensorflow.contrib.eager.python import tfe as contrib_eager
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class MLPTest(parameterized.TestCase, tf.test.TestCase):
 
   def setUp(self):
@@ -39,7 +41,7 @@ class MLPTest(parameterized.TestCase, tf.test.TestCase):
         "w": tf.truncated_normal_initializer(stddev=1.0),
     }
     self.regularizers = {
-        "w": tf.contrib.layers.l1_regularizer(scale=0.1),
+        "w": contrib_layers.l1_regularizer(scale=0.1),
     }
     self.partitioners = {
         "w": tf.fixed_size_partitioner(num_shards=2),
@@ -148,7 +150,7 @@ class MLPTest(parameterized.TestCase, tf.test.TestCase):
       if activate_final:
         self.assertEqual(net.op.type, "Relu")
       elif use_bias:
-        self.assertEqual(net.op.type, "Add")
+        self.assertIn(net.op.type, ("Add", "AddV2"))
       else:
         self.assertEqual(net.op.type, "MatMul")
 
@@ -182,10 +184,12 @@ class MLPTest(parameterized.TestCase, tf.test.TestCase):
   def testRegularizersInRegularizationLosses(self, active_final, use_bias,
                                              use_dropout):
     if use_bias:
-      regularizers = {"w": tf.contrib.layers.l1_regularizer(scale=0.5),
-                      "b": tf.contrib.layers.l2_regularizer(scale=0.5)}
+      regularizers = {
+          "w": contrib_layers.l1_regularizer(scale=0.5),
+          "b": contrib_layers.l2_regularizer(scale=0.5)
+      }
     else:
-      regularizers = {"w": tf.contrib.layers.l1_regularizer(scale=0.5)}
+      regularizers = {"w": contrib_layers.l1_regularizer(scale=0.5)}
 
     inputs = tf.random_normal(
         dtype=tf.float32, shape=[self.batch_size, self.input_size])
@@ -193,7 +197,8 @@ class MLPTest(parameterized.TestCase, tf.test.TestCase):
                        regularizers=regularizers, use_dropout=use_dropout)
     mlp(inputs)
 
-    graph_regularizers = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+    graph_regularizers = tf.get_collection(
+        tf.GraphKeys.REGULARIZATION_LOSSES)
     self.assertEqual(len(graph_regularizers), 3 * (2 if use_bias else 1))
     if not tf.executing_eagerly():
       self.assertRegexpMatches(graph_regularizers[0].name, ".*l1_regularizer.*")
@@ -276,7 +281,7 @@ class MLPTest(parameterized.TestCase, tf.test.TestCase):
       if activate_final:
         self.assertEqual(mlp_transposed_output.op.type, "Relu")
       elif use_bias:
-        self.assertEqual(mlp_transposed_output.op.type, "Add")
+        self.assertIn(mlp_transposed_output.op.type, ("Add", "AddV2"))
       else:
         self.assertEqual(mlp_transposed_output.op.type, "MatMul")
 
@@ -353,7 +358,7 @@ class MLPTest(parameterized.TestCase, tf.test.TestCase):
 
   def testDefun(self):
     mlp = snt.nets.MLP([1, 2, 3])
-    mlp = tf.contrib.eager.defun(mlp)
+    mlp = contrib_eager.defun(mlp)
     y = mlp(tf.ones([1, 1]))
     self.assertListEqual(y.shape.as_list(), [1, 3])
 

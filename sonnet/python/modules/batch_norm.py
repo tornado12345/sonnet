@@ -26,10 +26,12 @@ from __future__ import print_function
 # Dependency imports
 from sonnet.python.modules import base
 from sonnet.python.modules import util
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
+# pylint: disable=g-direct-tensorflow-import
 from tensorflow.python.layers import utils
 from tensorflow.python.training import moving_averages
+# pylint: enable=g-direct-tensorflow-import
 
 
 def create_beta_initializer():
@@ -111,7 +113,8 @@ class BatchNorm(base.AbstractModule):
 
       ...
 
-      update_ops = tf.group(*tf.get_collection(tf.GraphKeys.UPDATE_OPS))
+      update_ops = tf.group(*tf.get_collection(
+          tf.GraphKeys.UPDATE_OPS))
       train_op = tf.group(train_op, update_ops)
 
   Then, whenever `train_op` is run so also are the moving average update ops.
@@ -307,7 +310,7 @@ class BatchNorm(base.AbstractModule):
       return update_mean_op, update_variance_op
 
     def build_no_ops():
-      return (tf.no_op(), tf.no_op())
+      return tf.no_op(), tf.no_op()
 
     # Only make the ops if we know that `is_training=True`, or the value of
     # `is_training` is unknown.
@@ -318,7 +321,7 @@ class BatchNorm(base.AbstractModule):
           build_update_ops,
           build_no_ops,
       )
-      return (update_mean_op, update_variance_op)
+      return update_mean_op, update_variance_op
     else:
       return None
 

@@ -24,7 +24,8 @@ from __future__ import print_function
 from absl.testing import parameterized
 import numpy as np
 import sonnet as snt
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+from tensorflow.contrib import layers as contrib_layers
 
 from tensorflow.python.ops import variables
 
@@ -142,7 +143,7 @@ class EmbedTest(parameterized.TestCase, tf.test.TestCase):
       sess.run(embeddings)
 
   def testInvalidRegularizationParameters(self):
-    regularizer = tf.contrib.layers.l1_regularizer(scale=0.5)
+    regularizer = contrib_layers.l1_regularizer(scale=0.5)
     with self.assertRaisesRegexp(KeyError, "Invalid regularizer keys.*"):
       snt.Embed(
           vocab_size=self._vocab_size,
@@ -156,14 +157,15 @@ class EmbedTest(parameterized.TestCase, tf.test.TestCase):
                 regularizers={"embeddings": tf.zeros([1, 2, 3])})
 
   def testRegularizersInRegularizationLosses(self):
-    regularizer = tf.contrib.layers.l1_regularizer(scale=0.5)
+    regularizer = contrib_layers.l1_regularizer(scale=0.5)
     embed = snt.Embed(
         vocab_size=self._vocab_size,
         embed_dim=self._embed_dim,
         regularizers={"embeddings": regularizer})
     embed(tf.convert_to_tensor(self._ids))
 
-    regularizers = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+    regularizers = tf.get_collection(
+        tf.GraphKeys.REGULARIZATION_LOSSES)
     self.assertRegexpMatches(regularizers[0].name, ".*l1_regularizer.*")
 
   def testProperties(self):

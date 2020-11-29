@@ -33,19 +33,25 @@ import numpy as np
 import six
 from sonnet.python.modules import base
 from sonnet.python.modules import util
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 
 # Strings for TensorFlow convolution padding modes. See the following
 # documentation for an explanation of VALID versus SAME:
-# https://www.tensorflow.org/api_guides/python/nn#Convolution
+# https://www.tensorflow.org/api_docs/python/tf/nn/convolution
 SAME = "SAME"
 VALID = "VALID"
 FULL = "FULL"
 CAUSAL = "CAUSAL"
 REVERSE_CAUSAL = "REVERSE_CAUSAL"
 CONV_OP_ALLOWED_PADDINGS = {SAME, VALID}
-ALLOWED_PADDINGS = {SAME, VALID, FULL, CAUSAL, REVERSE_CAUSAL}
+ALLOWED_PADDINGS = {
+    SAME, VALID, FULL, CAUSAL, REVERSE_CAUSAL
+}
+CONSTANT_PADDING = "CONSTANT"
+REFLECT_PADDING = "REFLECT"
+SYMMETRIC_PADDING = "SYMMETRIC"
+ALLOWED_PADDING_VALUES = {CONSTANT_PADDING, REFLECT_PADDING, SYMMETRIC_PADDING}
 
 DATA_FORMAT_NCW = "NCW"
 DATA_FORMAT_NWC = "NWC"
@@ -173,6 +179,25 @@ def _verify_conv_op_supported_padding(padding):
   return padding
 
 
+def _verify_padding_value(padding_value):
+  """Verifies that the given padding mode is supported.
+
+  Args:
+    padding_value: One of ALLOWED_PADDING_VALUES.
+
+  Returns:
+    padding_value.
+
+  Raises:
+    ValueError: If padding_value is not one of ALLOWED_PADDING_VALUES.
+  """
+  if padding_value not in ALLOWED_PADDING_VALUES:
+    raise ValueError(
+        "Padding must be member of '{}', not {}".format(
+            ALLOWED_PADDING_VALUES, padding_value))
+  return padding_value
+
+
 def _fill_and_verify_padding(padding, n):
   """Verifies that the provided padding is supported and expands to size n.
 
@@ -206,12 +231,13 @@ def _fill_and_verify_padding(padding, n):
                   "these of size {}".format(padding, ALLOWED_PADDINGS, n))
 
 
-def _padding_to_conv_op_padding(padding):
+def _padding_to_conv_op_padding(padding, padding_value):
   """Whether to use SAME or VALID for the underlying convolution op.
 
   Args:
     padding: A tuple of members of ALLOWED_PADDINGS, e.g. as returned from
       `_fill_and_verify_padding`.
+    padding_value: A string of ALLOWED_PADDING_VALUES.
 
   Returns:
     One of CONV_OP_ALLOWED_PADDINGS, the padding method to use for the
@@ -222,7 +248,7 @@ def _padding_to_conv_op_padding(padding):
   """
   if not isinstance(padding, tuple):
     raise ValueError("padding should be a tuple.")
-  if all(p == SAME for p in padding):
+  if all(p == SAME for p in padding) and padding_value == CONSTANT_PADDING:
     # If we want SAME padding for all dimensions then we can use SAME for the
     # conv and avoid doing any extra padding.
     return SAME
@@ -267,7 +293,7 @@ def _verify_inputs(inputs, channel_index, data_format):
     base.UnderspecifiedError: If the channel dimension of `inputs` isn't
       defined.
     TypeError: If input Tensor dtype is not compatible with either
-      `tf.float16`, `tf.bfloat16` or `tf.float32`.
+      `tf.float16`, `tf.bfloat16`, `tf.float32` or `tf.float64`.
   """
   # Check shape.
   input_shape = tuple(inputs.get_shape().as_list())
@@ -280,10 +306,11 @@ def _verify_inputs(inputs, channel_index, data_format):
   # Check type.
   if not (tf.float16.is_compatible_with(inputs.dtype) or
           tf.bfloat16.is_compatible_with(inputs.dtype) or
-          tf.float32.is_compatible_with(inputs.dtype)):
+          tf.float32.is_compatible_with(inputs.dtype) or
+          tf.float64.is_compatible_with(inputs.dtype)):
     raise TypeError(
-        "Input must have dtype tf.float16, tf.bfloat16 or tf.float32, "
-        "but dtype was {}".format(inputs.dtype))
+        "Input must have dtype tf.float16, tf.bfloat16, tf.float32 or "
+        "tf.float64, but dtype was {}".format(inputs.dtype))
 
   # Check channel dim.
   input_channels = input_shape[channel_index]
@@ -378,9 +405,10 @@ class _ConvND(base.AbstractModule):
 
   def __init__(self, output_channels, kernel_shape, stride=1, rate=1,
                padding=SAME, use_bias=True, initializers=None,
-               partitioners=None, regularizers=None, mask=None,
-               data_format=DATA_FORMAT_NHWC,
-               custom_getter=None, name="conv_nd"):
+               partitioners=None, regularizers=None,
+               mask=None, data_format=DATA_FORMAT_NHWC,
+               padding_value=CONSTANT_PADDING, custom_getter=None,
+               name="conv_nd"):
     """Constructs a _ConvND module.
 
     Args:
@@ -402,7 +430,7 @@ class _ConvND(base.AbstractModule):
           `snt.CAUSAL`, `snt.REVERSE_CAUSAL`, or a sequence of these paddings
           (up to size N).
           * snt.SAME and snt.VALID are explained in the Tensorflow docs at
-            https://www.tensorflow.org/api_guides/python/nn#Convolution.
+            https://www.tensorflow.org/api_docs/python/tf/nn/convolution.
           * snt.FULL pre- and post-pads with the maximum padding which does not
             result in a convolution over just padded elements.
           * snt.CAUSAL pre-pads to ensure that each output value only depends on
@@ -433,6 +461,12 @@ class _ConvND(base.AbstractModule):
       mask: A convertible to a ND tensor which is multiplied
           component-wise with the weights (Optional).
       data_format: The data format of the input.
+      padding_value: The type of padding to use, either "CONSTANT", "SYMMETRIC"
+          or "REFLECT", as supported by the underlying tf.pad
+          (https://www.tensorflow.org/api_docs/python/tf/pad). Can only be set
+          globally for all dimensions. Defaults to "CONSTANT" which will pad
+          with zeros, potentially directly via the underlying convolution op if
+          the padding is SAME or VALID for all dimensions.
       custom_getter: Callable or dictionary of callables to use as
           custom getters inside the module. If a dictionary, the keys
           correspond to regexes to match variable names. See the
@@ -471,7 +505,7 @@ class _ConvND(base.AbstractModule):
 
     # The following is for backwards-compatibility from when we used to accept
     # N-strides of the form [1, ..., 1].
-    if (isinstance(stride, collections.Iterable) and
+    if (isinstance(stride, collections.Sequence) and
         len(stride) == len(data_format)):
       self._stride = tuple(stride)[1:-1]
     else:
@@ -483,7 +517,9 @@ class _ConvND(base.AbstractModule):
       raise base.NotSupportedError("Cannot have stride > 1 with rate > 1")
 
     self._padding = _fill_and_verify_padding(padding, self._n)
-    self._conv_op_padding = _padding_to_conv_op_padding(self._padding)
+    self._padding_value = _verify_padding_value(padding_value)
+    self._conv_op_padding = _padding_to_conv_op_padding(
+        self._padding, self._padding_value)
 
     self._use_bias = use_bias
     self.possible_keys = self.get_possible_initializer_keys(use_bias=use_bias)
@@ -528,7 +564,7 @@ class _ConvND(base.AbstractModule):
 
     Args:
       inputs: A ND Tensor of the same rank as `data_format`, and either of types
-      `tf.float16`, `tf.bfloat16` or `tf.float32`.
+      `tf.float16`, `tf.bfloat16`, `tf.float32` or `tf.float64`.
 
     Returns:
       A ND Tensor of shape [batch_size, output_dim_1, output_dim_2, ...,
@@ -545,7 +581,7 @@ class _ConvND(base.AbstractModule):
       base.IncompatibleShapeError: If a mask is present and its shape is
           incompatible with the shape of the weights.
       TypeError: If input Tensor dtype is not compatible with either
-          `tf.float16`, `tf.bfloat16` or `tf.float32`.
+          `tf.float16`, `tf.bfloat16`, `tf.float32` or `tf.float64`.
     """
     _verify_inputs(inputs, self._channel_index, self._data_format)
     self._input_shape = tuple(inputs.get_shape().as_list())
@@ -586,14 +622,15 @@ class _ConvND(base.AbstractModule):
 
     Args:
       inputs: A Tensor of shape `data_format` and of type `tf.float16`,
-          `tf.bfloat16` or `tf.float32`.
+          `tf.bfloat16`, `tf.float32` or `tf.float64`.
 
     Returns:
       inputs: The `inputs` argument that has had any required padding added.
     """
     if all(p == self._conv_op_padding for p in self._padding):
       # All axes require the same padding type that we're going to use for the
-      # underlying convolution op, so nothing needs to be done:
+      # underlying convolution op and we use the padding mode that is used by
+      # the convolution op, so nothing needs to be done:
       return inputs
 
     # In all other cases we use VALID as the underlying padding type, and for
@@ -623,14 +660,14 @@ class _ConvND(base.AbstractModule):
     else:  # N, ..., C
       paddings = [[0, 0]] + list(paddings) + [[0, 0]]
 
-    return tf.pad(inputs, paddings)
+    return tf.pad(inputs, paddings, mode=self._padding_value)
 
   def _apply_conv(self, inputs, w):
     """Apply a convolution operation on `inputs` using variable `w`.
 
     Args:
       inputs: A Tensor of shape `data_format` and of type `tf.float16`,
-          `tf.bfloat16` or `tf.float32`.
+          `tf.bfloat16`, `tf.float32` or `tf.float64`.
       w: A weight matrix of the same type as `inputs`.
 
     Returns:
@@ -649,7 +686,7 @@ class _ConvND(base.AbstractModule):
 
     Args:
       inputs: A Tensor of shape `data_format` and of type `tf.float16`,
-          `tf.bfloat16` or `tf.float32`.
+          `tf.bfloat16`, `tf.float32` or `tf.float64`.
 
     Returns:
       w: A weight matrix of the same type as `inputs`.
@@ -880,7 +917,7 @@ class _ConvNDTranspose(base.AbstractModule):
 
     See the following documentation for an explanation of VALID versus SAME
     padding modes:
-    https://www.tensorflow.org/api_guides/python/nn#Convolution
+    https://www.tensorflow.org/api_docs/python/tf/nn/convolution
 
     Args:
       output_channels: Number of output channels.
@@ -960,7 +997,7 @@ class _ConvNDTranspose(base.AbstractModule):
       raise ValueError("`kernel_shape` cannot be None.")
     self._kernel_shape = _fill_and_verify_parameter_shape(kernel_shape, self._n,
                                                           "kernel")
-    if (isinstance(stride, collections.Iterable) and
+    if (isinstance(stride, collections.Sequence) and
         len(stride) == len(data_format)):
       if self._data_format.startswith("N") and self._data_format.endswith("C"):
         if not stride[0] == stride[-1] == 1:
@@ -1001,11 +1038,11 @@ class _ConvNDTranspose(base.AbstractModule):
 
     Args:
       inputs: A Tensor of shape `data_format` and of type
-          `tf.float16`, `tf.bfloat16` or `tf.float32`.
+          `tf.float16`, `tf.bfloat16`, `tf.float32` or `tf.float64`.
 
     Returns:
-      A Tensor of shape `data_format` and of type `tf.float16`, `tf.bfloat16`
-          or `tf.float32`.
+      A Tensor of shape `data_format` and of type `tf.float16`, `tf.bfloat16`,
+         `tf.float32` or `tf.float64`.
 
     Raises:
       ValueError: If connecting the module into the graph any time after the
@@ -1018,7 +1055,7 @@ class _ConvNDTranspose(base.AbstractModule):
       base.IncompatibleShapeError: If `output_shape` is an iterable and is not
           in the format `(out_height, out_width)`.
       TypeError: If input Tensor dtype is not compatible with either
-          `tf.float16`, `tf.bfloat16` or `tf.float32`.
+          `tf.float16`, `tf.bfloat16`, `tf.float32` or `tf.float64`.
     """
     _verify_inputs(inputs, self._channel_index, self._data_format)
     self._input_shape = tuple(inputs.get_shape().as_list())
@@ -1099,7 +1136,7 @@ class _ConvNDTranspose(base.AbstractModule):
 
     Args:
       inputs: A Tensor of shape `data_format` and of type `tf.float16`,
-          `tf.bfloat16` or `tf.float32`.
+          `tf.bfloat16`, `tf.float32` or `tf.float64`.
 
     Returns:
       w: A weight matrix of the same type as `inputs`.
@@ -1130,7 +1167,7 @@ class _ConvNDTranspose(base.AbstractModule):
 
     Args:
       inputs: A Tensor of shape `data_format` and of type `tf.float16`,
-          `tf.bfloat16` or `tf.float32`.
+          `tf.bfloat16`, `tf.float32` or `tf.float64`.
 
     Returns:
       output_shape: A tensor of shape (`batch_size`, `conv_output_shape`).
@@ -1152,6 +1189,8 @@ class _ConvNDTranspose(base.AbstractModule):
       out_shape_tuple = out_channels + out_shape
     elif self._data_format.startswith("N") and self._data_format.endswith("C"):
       out_shape_tuple = out_shape + out_channels
+    else:
+      raise ValueError("Unsupported data format: {}".format(self._data_format))
 
     output_shape = tf.concat([batch_size, out_shape_tuple], 0)
     return output_shape
@@ -1164,10 +1203,10 @@ class _ConvNDTranspose(base.AbstractModule):
 
     Args:
       inputs: A Tensor of shape `data_format` and of type `tf.float16`,
-          `tf.bfloat16` or `tf.float32`.
+          `tf.bfloat16`, `tf.float32` or `tf.float64`.
       outputs: A Tensor of shape `data_format` and of type `tf.float16`,
-          `tf.bfloat16` or `tf.float32`. The output of `inputs` from a transpose
-          convolution op.
+          `tf.bfloat16`, `tf.float32` or `tf.float64`. The output of `inputs`
+          from a transpose convolution op.
 
     Returns:
       outputs: The passed-in `outputs` with all shape information filled in.
@@ -1179,6 +1218,8 @@ class _ConvNDTranspose(base.AbstractModule):
     elif self._data_format.startswith("N") and self._data_format.endswith("C"):
       output_shape_value = ((batch_size_value,) + self.output_shape +
                             (self.output_channels,))
+    else:
+      raise ValueError("Unsupported data format: {}".format(self._data_format))
     outputs.set_shape(output_shape_value)
     return outputs
 
@@ -1286,13 +1327,13 @@ class Conv1D(_ConvND, base.Transposable):
   def __init__(self, output_channels, kernel_shape, stride=1, rate=1,
                padding=SAME, use_bias=True, initializers=None,
                partitioners=None, regularizers=None, mask=None,
-               data_format=DATA_FORMAT_NWC, custom_getter=None,
-               name="conv_1d"):
+               data_format=DATA_FORMAT_NWC, padding_value=CONSTANT_PADDING,
+               custom_getter=None, name="conv_1d"):
     """Constructs a Conv1D module.
 
     See the following documentation for an explanation of VALID versus SAME
     padding modes:
-    https://www.tensorflow.org/api_guides/python/nn#Convolution
+    https://www.tensorflow.org/api_docs/python/tf/nn/convolution
 
     Args:
       output_channels: Number of output channels. `output_channels` can be
@@ -1312,7 +1353,7 @@ class Conv1D(_ConvND, base.Transposable):
           `snt.CAUSAL`, `snt.REVERSE_CAUSAL`, or a sequence of these paddings
           of length 1.
           * snt.SAME and snt.VALID are explained in the Tensorflow docs at
-            https://www.tensorflow.org/api_guides/python/nn#Convolution.
+            https://www.tensorflow.org/api_docs/python/tf/nn/convolution.
           * snt.FULL pre- and post-pads with the maximum padding which does not
             result in a convolution over just padded elements.
           * snt.CAUSAL pre-pads to ensure that each output value only depends on
@@ -1345,6 +1386,11 @@ class Conv1D(_ConvND, base.Transposable):
       data_format: A string. Specifies whether the channel dimension
           of the input and output is the last dimension (default, NWC), or the
           second dimension (NCW).
+      padding_value: The type of padding to use, either "CONSTANT", "SYMMETRIC"
+          or "REFLECT", as supported by the underlying tf.pad
+          (https://www.tensorflow.org/api_docs/python/tf/pad). Defaults to
+          "CONSTANT" which will pad with zeros, potentially directly via the
+          underlying convolution op if the padding is SAME.
       custom_getter: Callable or dictionary of callables to use as
           custom getters inside the module. If a dictionary, the keys
           correspond to regexes to match variable names. See the
@@ -1378,8 +1424,8 @@ class Conv1D(_ConvND, base.Transposable):
                        "{}".format(data_format, SUPPORTED_1D_DATA_FORMATS))
     super(Conv1D, self).__init__(
         output_channels=output_channels, kernel_shape=kernel_shape,
-        stride=stride, rate=rate, padding=padding, use_bias=use_bias,
-        initializers=initializers, partitioners=partitioners,
+        stride=stride, rate=rate, padding=padding, padding_value=padding_value,
+        use_bias=use_bias, initializers=initializers, partitioners=partitioners,
         regularizers=regularizers, mask=mask, data_format=data_format,
         custom_getter=custom_getter, name=name)
 
@@ -1445,7 +1491,7 @@ class Conv1DTranspose(_ConvNDTranspose, base.Transposable):
 
     See the following documentation for an explanation of VALID versus SAME
     padding modes:
-    https://www.tensorflow.org/api_guides/python/nn#Convolution
+    https://www.tensorflow.org/api_docs/python/tf/nn/convolution
 
     Args:
       output_channels: Number of output channels. Can be either a number or a
@@ -1561,7 +1607,8 @@ class CausalConv1D(_ConvND):
                stride=1, rate=1, use_bias=True, initializers=None,
                partitioners=None, regularizers=None, mask=None,
                padding=CAUSAL, data_format=DATA_FORMAT_NWC,
-               custom_getter=None, name="causal_conv_1d"):
+               padding_value=CONSTANT_PADDING, custom_getter=None,
+               name="causal_conv_1d"):
     """Constructs a CausalConv1D module.
 
     This is deprecated, please use the padding=CAUSAL argument to Conv1D.
@@ -1601,6 +1648,10 @@ class CausalConv1D(_ConvND):
       data_format: A string. Specifies whether the channel dimension
           of the input and output is the last dimension (default, NWC), or the
           second dimension (NCW).
+      padding_value: The type of padding to use, either "CONSTANT", "SYMMETRIC"
+          or "REFLECT", as supported by the underlying tf.pad
+          (https://www.tensorflow.org/api_docs/python/tf/pad). Defaults to
+          "CONSTANT" which will pad with zeros.
       custom_getter: Callable or dictionary of callables to use as
           custom getters inside the module. If a dictionary, the keys
           correspond to regexes to match variable names. See the
@@ -1642,10 +1693,9 @@ class CausalConv1D(_ConvND):
           "deprecated, please switch to Conv1D with padding=CAUSAL.")
     super(CausalConv1D, self).__init__(
         output_channels=output_channels, kernel_shape=kernel_shape,
-        stride=stride, rate=rate, padding=CAUSAL, use_bias=use_bias,
-        initializers=initializers, partitioners=partitioners,
-        regularizers=regularizers, mask=mask,
-        data_format=data_format,
+        stride=stride, rate=rate, padding=CAUSAL, padding_value=padding_value,
+        use_bias=use_bias, initializers=initializers, partitioners=partitioners,
+        regularizers=regularizers, mask=mask, data_format=data_format,
         custom_getter=custom_getter, name=name)
 
 
@@ -1658,13 +1708,13 @@ class Conv2D(_ConvND, base.Transposable):
   def __init__(self, output_channels, kernel_shape, stride=1, rate=1,
                padding=SAME, use_bias=True, initializers=None,
                partitioners=None, regularizers=None, mask=None,
-               data_format=DATA_FORMAT_NHWC, custom_getter=None,
-               name="conv_2d"):
+               data_format=DATA_FORMAT_NHWC, padding_value=CONSTANT_PADDING,
+               custom_getter=None, name="conv_2d"):
     """Constructs a Conv2D module.
 
     See the following documentation for an explanation of VALID versus SAME
     padding modes:
-    https://www.tensorflow.org/api_guides/python/nn#Convolution
+    https://www.tensorflow.org/api_docs/python/tf/nn/convolution
 
     Args:
       output_channels: Number of output channels. `output_channels` can be
@@ -1684,7 +1734,7 @@ class Conv2D(_ConvND, base.Transposable):
           `snt.CAUSAL`, `snt.REVERSE_CAUSAL`, or a sequence of these paddings
           of length 2.
           * snt.SAME and snt.VALID are explained in the Tensorflow docs at
-            https://www.tensorflow.org/api_guides/python/nn#Convolution.
+            https://www.tensorflow.org/api_docs/python/tf/nn/convolution.
           * snt.FULL pre- and post-pads with the maximum padding which does not
             result in a convolution over just padded elements.
           * snt.CAUSAL pre-pads to ensure that each output value only depends on
@@ -1717,6 +1767,12 @@ class Conv2D(_ConvND, base.Transposable):
       data_format: A string. Specifies whether the channel dimension
           of the input and output is the last dimension (default, NHWC), or the
           second dimension (NCHW).
+      padding_value: The type of padding to use, either "CONSTANT", "SYMMETRIC"
+          or "REFLECT", as supported by the underlying tf.pad
+          (https://www.tensorflow.org/api_docs/python/tf/pad). Can only be set
+          globally for all dimensions. Defaults to "CONSTANT" which will pad
+          with zeros, potentially directly via the underlying convolution op if
+          the padding is SAME for all dimensions.
       custom_getter: Callable or dictionary of callables to use as
           custom getters inside the module. If a dictionary, the keys
           correspond to regexes to match variable names. See the
@@ -1751,8 +1807,8 @@ class Conv2D(_ConvND, base.Transposable):
                        "{}".format(data_format, SUPPORTED_2D_DATA_FORMATS))
     super(Conv2D, self).__init__(
         output_channels=output_channels, kernel_shape=kernel_shape,
-        stride=stride, rate=rate, padding=padding, use_bias=use_bias,
-        initializers=initializers, partitioners=partitioners,
+        stride=stride, rate=rate, padding=padding, padding_value=padding_value,
+        use_bias=use_bias, initializers=initializers, partitioners=partitioners,
         regularizers=regularizers, mask=mask, data_format=data_format,
         custom_getter=custom_getter, name=name)
 
@@ -1818,7 +1874,7 @@ class Conv2DTranspose(_ConvNDTranspose, base.Transposable):
 
     See the following documentation for an explanation of VALID versus SAME
     padding modes:
-    https://www.tensorflow.org/api_guides/python/nn#Convolution
+    https://www.tensorflow.org/api_docs/python/tf/nn/convolution
 
     Args:
       output_channels: Number of output channels.
@@ -1929,13 +1985,13 @@ class Conv3D(_ConvND, base.Transposable):
   def __init__(self, output_channels, kernel_shape, stride=1, rate=1,
                padding=SAME, use_bias=True, initializers=None,
                partitioners=None, regularizers=None, mask=None,
-               data_format=DATA_FORMAT_NDHWC, custom_getter=None,
-               name="conv_3d"):
+               data_format=DATA_FORMAT_NDHWC, padding_value=CONSTANT_PADDING,
+               custom_getter=None, name="conv_3d"):
     """Constructs a Conv3D module.
 
     See the following documentation for an explanation of VALID versus SAME
     padding modes:
-    https://www.tensorflow.org/api_guides/python/nn#Convolution
+    https://www.tensorflow.org/api_docs/python/tf/nn/convolution
 
     Args:
       output_channels: Number of output channels. `output_channels` can be
@@ -1955,7 +2011,7 @@ class Conv3D(_ConvND, base.Transposable):
           `snt.CAUSAL`, `snt.REVERSE_CAUSAL`, or a sequence of these paddings
           of length 3.
           * snt.SAME and snt.VALID are explained in the Tensorflow docs at
-            https://www.tensorflow.org/api_guides/python/nn#Convolution.
+            https://www.tensorflow.org/api_docs/python/tf/nn/convolution.
           * snt.FULL pre- and post-pads with the maximum padding which does not
             result in a convolution over just padded elements.
           * snt.CAUSAL pre-pads to ensure that each output value only depends on
@@ -1988,6 +2044,12 @@ class Conv3D(_ConvND, base.Transposable):
       data_format: A string. Specifies whether the channel dimension
           of the input and output is the last dimension (default, NDHWC), or
           the second dimension (NCDHW).
+      padding_value: The type of padding to use, either "CONSTANT", "SYMMETRIC"
+          or "REFLECT", as supported by the underlying tf.pad
+          (https://www.tensorflow.org/api_docs/python/tf/pad). Can only be set
+          globally for all dimensions. Defaults to "CONSTANT" which will pad
+          with zeros, potentially directly via the underlying convolution op if
+          the padding is SAME for all dimensions.
       custom_getter: Callable or dictionary of callables to use as
           custom getters inside the module. If a dictionary, the keys
           correspond to regexes to match variable names. See the
@@ -2019,8 +2081,8 @@ class Conv3D(_ConvND, base.Transposable):
                        "{}".format(data_format, SUPPORTED_3D_DATA_FORMATS))
     super(Conv3D, self).__init__(
         output_channels=output_channels, kernel_shape=kernel_shape,
-        stride=stride, rate=rate, padding=padding, use_bias=use_bias,
-        initializers=initializers, partitioners=partitioners,
+        stride=stride, rate=rate, padding=padding, padding_value=padding_value,
+        use_bias=use_bias, initializers=initializers, partitioners=partitioners,
         regularizers=regularizers, mask=mask, data_format=data_format,
         custom_getter=custom_getter, name=name)
 
@@ -2085,7 +2147,7 @@ class Conv3DTranspose(_ConvNDTranspose, base.Transposable):
 
     See the following documentation for an explanation of VALID versus SAME
     padding modes:
-    https://www.tensorflow.org/api_guides/python/nn#Convolution
+    https://www.tensorflow.org/api_docs/python/tf/nn/convolution
 
     Args:
       output_channels: Number of output channels. `output_channels` can be
@@ -2189,13 +2251,13 @@ class InPlaneConv2D(_ConvND):
 
   def __init__(self, kernel_shape, stride=1, padding=SAME, use_bias=True,
                initializers=None, partitioners=None, regularizers=None,
-               data_format=DATA_FORMAT_NHWC, custom_getter=None,
-               name="in_plane_conv2d"):
+               data_format=DATA_FORMAT_NHWC, padding_value=CONSTANT_PADDING,
+               custom_getter=None, name="in_plane_conv2d"):
     """Constructs an InPlaneConv2D module.
 
     See the following documentation for an explanation of VALID versus SAME
     padding modes:
-    https://www.tensorflow.org/api_guides/python/nn#Convolution
+    https://www.tensorflow.org/api_docs/python/tf/nn/convolution
 
     Args:
       kernel_shape: Iterable with 2 elements in the layout [filter_height,
@@ -2207,7 +2269,7 @@ class InPlaneConv2D(_ConvND):
           `snt.CAUSAL`, `snt.REVERSE_CAUSAL`, or a sequence of these paddings
           of length 2.
           * snt.SAME and snt.VALID are explained in the Tensorflow docs at
-            https://www.tensorflow.org/api_guides/python/nn#Convolution.
+            https://www.tensorflow.org/api_docs/python/tf/nn/convolution.
           * snt.FULL pre- and post-pads with the maximum padding which does not
             result in a convolution over just padded elements.
           * snt.CAUSAL pre-pads to ensure that each output value only depends on
@@ -2234,6 +2296,12 @@ class InPlaneConv2D(_ConvND):
       data_format: A string. Specifies whether the channel dimension
           of the input and output is the last dimension (default, NHWC), or the
           second dimension (NCHW).
+      padding_value: The type of padding to use, either "CONSTANT", "SYMMETRIC"
+          or "REFLECT", as supported by the underlying tf.pad
+          (https://www.tensorflow.org/api_docs/python/tf/pad). Can only be set
+          globally for all dimensions. Defaults to "CONSTANT" which will pad
+          with zeros, potentially directly via the underlying convolution op if
+          the padding is SAME for all dimensions.
       custom_getter: Callable or dictionary of callables to use as
           custom getters inside the module. If a dictionary, the keys
           correspond to regexes to match variable names. See the
@@ -2261,8 +2329,8 @@ class InPlaneConv2D(_ConvND):
                        "{}".format(data_format, SUPPORTED_2D_DATA_FORMATS))
     super(InPlaneConv2D, self).__init__(
         output_channels=lambda: self.input_channels,
-        kernel_shape=kernel_shape,
-        stride=stride, padding=padding, use_bias=use_bias,
+        kernel_shape=kernel_shape, stride=stride, padding=padding,
+        padding_value=padding_value, use_bias=use_bias,
         initializers=initializers, partitioners=partitioners,
         regularizers=regularizers, data_format=data_format,
         custom_getter=custom_getter, name=name)
@@ -2274,7 +2342,7 @@ class InPlaneConv2D(_ConvND):
 
     Args:
       inputs: A Tensor of shape `data_format` and of type `tf.float16`,
-          `tf.bfloat16` or `tf.float32`.
+          `tf.bfloat16`, `tf.float32` or `tf.float64`.
 
     Returns:
       w: A weight matrix of the same type as `inputs` and of shape
@@ -2299,7 +2367,7 @@ class InPlaneConv2D(_ConvND):
 
     Args:
       inputs: A Tensor of shape `data_format` and of type `tf.float16`,
-          `tf.bfloat16` or `tf.float32`.
+          `tf.bfloat16`, `tf.float32` or `tf.float64`.
       w: A weight matrix of the same type as `inputs`.
 
     Returns:
@@ -2331,13 +2399,14 @@ class DepthwiseConv2D(_ConvND):
                partitioners=None,
                regularizers=None,
                data_format=DATA_FORMAT_NHWC,
+               padding_value=CONSTANT_PADDING,
                custom_getter=None,
                name="conv_2d_depthwise"):
     """Constructs a DepthwiseConv2D module.
 
     See the following documentation for an explanation of VALID versus SAME
     padding modes:
-    https://www.tensorflow.org/api_guides/python/nn#Convolution
+    https://www.tensorflow.org/api_docs/python/tf/nn/convolution
 
     Args:
       channel_multiplier: Number of channels to expand convolution to. Must be
@@ -2358,7 +2427,7 @@ class DepthwiseConv2D(_ConvND):
           `snt.CAUSAL`, `snt.REVERSE_CAUSAL`, or a sequence of these paddings
           of length 2.
           * snt.SAME and snt.VALID are explained in the Tensorflow docs at
-            https://www.tensorflow.org/api_guides/python/nn#Convolution.
+            https://www.tensorflow.org/api_docs/python/tf/nn/convolution.
           * snt.FULL pre- and post-pads with the maximum padding which does not
             result in a convolution over just padded elements.
           * snt.CAUSAL pre-pads to ensure that each output value only depends on
@@ -2385,6 +2454,12 @@ class DepthwiseConv2D(_ConvND):
       data_format: A string. Specifies whether the channel dimension
           of the input and output is the last dimension (default, NHWC), or the
           second dimension ("NCHW").
+      padding_value: The type of padding to use, either "CONSTANT", "SYMMETRIC"
+          or "REFLECT", as supported by the underlying tf.pad
+          (https://www.tensorflow.org/api_docs/python/tf/pad). Can only be set
+          globally for all dimensions. Defaults to "CONSTANT" which will pad
+          with zeros, potentially directly via the underlying convolution op if
+          the padding is SAME for all dimensions.
       custom_getter: Callable or dictionary of callables to use as
           custom getters inside the module. If a dictionary, the keys
           correspond to regexes to match variable names. See the
@@ -2428,7 +2503,8 @@ class DepthwiseConv2D(_ConvND):
     super(DepthwiseConv2D, self).__init__(
         output_channels=lambda: self._input_channels * self._channel_multiplier,
         kernel_shape=kernel_shape,
-        stride=stride, padding=padding, use_bias=use_bias,
+        stride=stride, padding=padding,
+        padding_value=padding_value, use_bias=use_bias,
         initializers=initializers, partitioners=partitioners,
         regularizers=regularizers, data_format=data_format,
         custom_getter=custom_getter, name=name)
@@ -2440,7 +2516,7 @@ class DepthwiseConv2D(_ConvND):
 
     Args:
       inputs: A Tensor of shape `data_format` and of type `tf.float16`,
-          `tf.bfloat16` or `tf.float32`.
+          `tf.bfloat16`, `tf.float32` or `tf.float64`.
 
     Returns:
       w: A weight matrix of the same type as `inputs` and of shape
@@ -2471,7 +2547,7 @@ class DepthwiseConv2D(_ConvND):
 
     Args:
       inputs: A Tensor of shape `data_format` and of type `tf.float16`,
-          `tf.bfloat16` or `tf.float32`.
+          `tf.bfloat16`, `tf.float32` or `tf.float64`.
       w: A weight matrix of the same type as `inputs`.
 
     Returns:
@@ -2509,13 +2585,14 @@ class SeparableConv2D(_ConvND):
                partitioners=None,
                regularizers=None,
                data_format=DATA_FORMAT_NHWC,
+               padding_value=CONSTANT_PADDING,
                custom_getter=None,
                name="separable_conv2d"):
     """Constructs a SeparableConv2D module.
 
     See the following documentation for an explanation of VALID versus SAME
     padding modes:
-    https://www.tensorflow.org/api_guides/python/nn#Convolution
+    https://www.tensorflow.org/api_docs/python/tf/nn/convolution
 
     Args:
       output_channels: Number of output channels. Must be an integer.
@@ -2539,7 +2616,7 @@ class SeparableConv2D(_ConvND):
           `snt.CAUSAL`, `snt.REVERSE_CAUSAL`, or a sequence of these paddings
           of length 2.
           * snt.SAME and snt.VALID are explained in the Tensorflow docs at
-            https://www.tensorflow.org/api_guides/python/nn#Convolution.
+            https://www.tensorflow.org/api_docs/python/tf/nn/convolution.
           * snt.FULL pre- and post-pads with the maximum padding which does not
             result in a convolution over just padded elements.
           * snt.CAUSAL pre-pads to ensure that each output value only depends on
@@ -2568,6 +2645,12 @@ class SeparableConv2D(_ConvND):
       data_format: A string. Specifies whether the channel dimension
           of the input and output is the last dimension (default, NHWC), or the
           second dimension ("NCHW").
+      padding_value: The type of padding to use, either "CONSTANT", "SYMMETRIC"
+          or "REFLECT", as supported by the underlying tf.pad
+          (https://www.tensorflow.org/api_docs/python/tf/pad). Can only be set
+          globally for all dimensions. Defaults to "CONSTANT" which will pad
+          with zeros, potentially directly via the underlying convolution op if
+          the padding is SAME for all dimensions.
       custom_getter: Callable or dictionary of callables to use as
           custom getters inside the module. If a dictionary, the keys
           correspond to regexes to match variable names. See the
@@ -2618,9 +2701,8 @@ class SeparableConv2D(_ConvND):
     super(SeparableConv2D, self).__init__(
         output_channels=output_channels,
         kernel_shape=kernel_shape,
-        stride=stride, padding=padding, rate=rate,
-        use_bias=use_bias,
-        initializers=initializers, partitioners=partitioners,
+        stride=stride, padding=padding, padding_value=padding_value, rate=rate,
+        use_bias=use_bias, initializers=initializers, partitioners=partitioners,
         regularizers=regularizers, data_format=data_format,
         custom_getter=custom_getter, name=name)
 
@@ -2634,7 +2716,7 @@ class SeparableConv2D(_ConvND):
     Args:
       inputs: A 4D Tensor of shape:
           [batch_size, input_height, input_width, input_channels]
-          and of type `tf.float16`, `tf.bfloat16` or `tf.float32`.
+          and of type `tf.float16`, `tf.bfloat16`, `tf.float32` or `tf.float64`.
 
     Returns:
       A tuple of two 4D Tensors, each with the same dtype as `inputs`:
@@ -2681,7 +2763,7 @@ class SeparableConv2D(_ConvND):
 
     Args:
       inputs: A Tensor of shape `data_format` and of type `tf.float16`,
-          `tf.bfloat16` or `tf.float32`.
+          `tf.bfloat16`, `tf.float32` or `tf.float64`.
       w: A tuple of weight matrices of the same type as `inputs`, the first
         being the depthwise weight matrix, and the second being the pointwise
         weight matrix.
@@ -2736,13 +2818,14 @@ class SeparableConv1D(_ConvND):
                partitioners=None,
                regularizers=None,
                data_format=DATA_FORMAT_NWC,
+               padding_value=CONSTANT_PADDING,
                custom_getter=None,
                name="separable_conv1d"):
     """Constructs a SeparableConv1D module.
 
     See the following documentation for an explanation of VALID versus SAME
     padding modes:
-    https://www.tensorflow.org/api_guides/python/nn#Convolution
+    https://www.tensorflow.org/api_docs/python/tf/nn/convolution
 
     Args:
       output_channels: Number of output channels. Must be an integer.
@@ -2766,7 +2849,7 @@ class SeparableConv1D(_ConvND):
           `snt.CAUSAL`, `snt.REVERSE_CAUSAL`, or a sequence of these paddings
           of length 1.
           * snt.SAME and snt.VALID are explained in the Tensorflow docs at
-            https://www.tensorflow.org/api_guides/python/nn#Convolution.
+            https://www.tensorflow.org/api_docs/python/tf/nn/convolution.
           * snt.FULL pre- and post-pads with the maximum padding which does not
             result in a convolution over just padded elements.
           * snt.CAUSAL pre-pads to ensure that each output value only depends on
@@ -2795,6 +2878,12 @@ class SeparableConv1D(_ConvND):
       data_format: A string. Specifies whether the channel dimension
           of the input and output is the last dimension (default, NWC), or the
           second dimension ("NCW").
+      padding_value: The type of padding to use, either "CONSTANT", "SYMMETRIC"
+          or "REFLECT", as supported by the underlying tf.pad
+          (https://www.tensorflow.org/api_docs/python/tf/pad). Can only be set
+          globally for all dimensions. Defaults to "CONSTANT" which will pad
+          with zeros, potentially directly via the underlying convolution op if
+          the padding is SAME for all dimensions.
       custom_getter: Callable or dictionary of callables to use as
           custom getters inside the module. If a dictionary, the keys
           correspond to regexes to match variable names. See the
@@ -2845,8 +2934,8 @@ class SeparableConv1D(_ConvND):
     super(SeparableConv1D, self).__init__(
         output_channels=output_channels,
         kernel_shape=kernel_shape,
-        stride=stride, rate=rate, padding=padding, use_bias=use_bias,
-        initializers=initializers, partitioners=partitioners,
+        stride=stride, rate=rate, padding=padding, padding_value=padding_value,
+        use_bias=use_bias, initializers=initializers, partitioners=partitioners,
         regularizers=regularizers, data_format=data_format,
         custom_getter=custom_getter, name=name)
 
@@ -2860,7 +2949,7 @@ class SeparableConv1D(_ConvND):
     Args:
       inputs: A 4D Tensor of shape:
           [batch_size, input_height, input_width, input_channels]
-          and of type `tf.float16`, `tf.bfloat16` or `tf.float32`.
+          and of type `tf.float16`, `tf.bfloat16`, `tf.float32` or `tf.float64`.
 
     Returns:
       A tuple of two 4D Tensors, each with the same dtype as `inputs`:
@@ -2907,7 +2996,7 @@ class SeparableConv1D(_ConvND):
 
     Args:
       inputs: A Tensor of shape `data_format` and of type `tf.float16`,
-          `tf.bfloat16` or `tf.float32`.
+          `tf.bfloat16`, `tf.float32` or `tf.float64`.
       w: A tuple of weight matrices of the same type as `inputs`, the first
         being the depthwise weight matrix, and the second being the pointwise
         weight matrix.

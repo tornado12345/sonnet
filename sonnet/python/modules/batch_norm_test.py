@@ -23,7 +23,8 @@ from __future__ import print_function
 from absl.testing import parameterized
 import numpy as np
 import sonnet as snt
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+from tensorflow.contrib import layers as contrib_layers
 
 from tensorflow.python.ops import variables
 
@@ -207,9 +208,11 @@ class BatchNormTest(parameterized.TestCase, tf.test.TestCase):
     with tf.name_scope("net2"):
       bn(inputs, is_training=True)
 
-    update_ops_1 = tuple(tf.get_collection(tf.GraphKeys.UPDATE_OPS, "net1"))
+    update_ops_1 = tuple(tf.get_collection(tf.GraphKeys.UPDATE_OPS,
+                                           "net1"))
     self.assertEqual(len(update_ops_1), 2)
-    update_ops_2 = tuple(tf.get_collection(tf.GraphKeys.UPDATE_OPS, "net2"))
+    update_ops_2 = tuple(tf.get_collection(tf.GraphKeys.UPDATE_OPS,
+                                           "net2"))
     self.assertEqual(len(update_ops_2), 2)
 
     with self.test_session() as sess:
@@ -362,7 +365,8 @@ class BatchNormTest(parameterized.TestCase, tf.test.TestCase):
     bn(inputs1, is_training=True)
     bn(inputs2, is_training=False)
 
-    self.assertEqual(len(tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)), 4)
+    self.assertLen(tf.get_collection(
+        tf.GraphKeys.GLOBAL_VARIABLES), 4)
 
     # We should have one set of update ops
     update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
@@ -427,7 +431,7 @@ class BatchNormTest(parameterized.TestCase, tf.test.TestCase):
   def testInvalidInitializerParameters(self):
     with self.assertRaisesRegexp(KeyError, "Invalid initializer keys.*"):
       snt.BatchNorm(
-          initializers={"not_gamma": tf.contrib.layers.l1_regularizer(0.5)})
+          initializers={"not_gamma": contrib_layers.l1_regularizer(0.5)})
 
     err = "Initializer for 'gamma' is not a callable function"
     with self.assertRaisesRegexp(TypeError, err):
@@ -436,7 +440,7 @@ class BatchNormTest(parameterized.TestCase, tf.test.TestCase):
   def testInvalidPartitionerParameters(self):
     with self.assertRaisesRegexp(KeyError, "Invalid partitioner keys.*"):
       snt.BatchNorm(
-          partitioners={"not_gamma": tf.contrib.layers.l1_regularizer(0.5)})
+          partitioners={"not_gamma": contrib_layers.l1_regularizer(0.5)})
 
     err = "Partitioner for 'gamma' is not a callable function"
     with self.assertRaisesRegexp(TypeError, err):
@@ -445,7 +449,7 @@ class BatchNormTest(parameterized.TestCase, tf.test.TestCase):
   def testInvalidRegularizationParameters(self):
     with self.assertRaisesRegexp(KeyError, "Invalid regularizer keys.*"):
       snt.BatchNorm(
-          regularizers={"not_gamma": tf.contrib.layers.l1_regularizer(0.5)})
+          regularizers={"not_gamma": contrib_layers.l1_regularizer(0.5)})
 
     err = "Regularizer for 'gamma' is not a callable function"
     with self.assertRaisesRegexp(TypeError, err):
@@ -496,9 +500,9 @@ class BatchNormTest(parameterized.TestCase, tf.test.TestCase):
   def testRegularizersInRegularizationLosses(self, offset, scale):
     regularizers = {}
     if offset:
-      regularizers["beta"] = tf.contrib.layers.l1_regularizer(scale=0.5)
+      regularizers["beta"] = contrib_layers.l1_regularizer(scale=0.5)
     if scale:
-      regularizers["gamma"] = tf.contrib.layers.l2_regularizer(scale=0.5)
+      regularizers["gamma"] = contrib_layers.l2_regularizer(scale=0.5)
 
     inputs_shape = [10, 10]
     inputs = tf.placeholder(tf.float32, shape=[None] + inputs_shape)
@@ -506,7 +510,8 @@ class BatchNormTest(parameterized.TestCase, tf.test.TestCase):
     self.assertEqual(bn.regularizers, regularizers)
     bn(inputs, is_training=True)
 
-    graph_regularizers = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+    graph_regularizers = tf.get_collection(
+        tf.GraphKeys.REGULARIZATION_LOSSES)
     if not offset and not scale:
       self.assertFalse(graph_regularizers)
     if offset and not scale:

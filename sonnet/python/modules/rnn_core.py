@@ -32,11 +32,14 @@ import six
 from six.moves import xrange  # pylint: disable=redefined-builtin
 from sonnet.python.modules import base
 from sonnet.python.modules import basic
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 import wrapt
+from tensorflow.contrib import framework as contrib_framework
 
+# pylint: disable=g-direct-tensorflow-import
 from tensorflow.python.ops import rnn_cell_impl
-nest = tf.contrib.framework.nest
+# pylint: enable=g-direct-tensorflow-import
+nest = contrib_framework.nest
 
 
 def _single_learnable_state(state, state_id=0, learnable=True):
@@ -403,26 +406,3 @@ def with_doc(fn_with_doc_to_copy):
     return wrapping_fn(fn_with_doc_to_copy)  # pylint: disable=no-value-for-parameter
 
   return decorator
-
-
-def wrap_rnn_cell_class(wrapped_class):
-  """Wraps an RNN cell class with a sub-class of `RNNCellWrapper`.
-
-  The returned wrapper class will contain an `__init__` method whose
-  docstring, *args, and **kwargs are based on `wrapped_class.__init__`.
-
-  Args:
-    wrapped_class: A sub-class (NOT an instance) of `tf.contrib.rnn.RNNCell`.
-
-  Returns:
-    A sub-class (NOT an instance) of `RNNCellWrapper`, with an `__init__`
-    method that delegates to that of `wrapped_class`.
-  """
-
-  class Wrapper(RNNCellWrapper):
-
-    @with_doc(wrapped_class.__init__)
-    def __init__(self, *args, **kwargs):
-      super(Wrapper, self).__init__(wrapped_class, *args, **kwargs)
-
-  return Wrapper

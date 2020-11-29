@@ -65,7 +65,6 @@ _ensure_dependency_available_at_version('tensorflow_probability', '0.4.0')
 
 # Check some version of TF is available.
 from sonnet.python import custom_getters
-# Stripped internal import.
 from sonnet.python.modules import nets
 from sonnet.python.modules.attention import AttentiveRead
 from sonnet.python.modules.base import AbstractModule
@@ -105,6 +104,7 @@ from sonnet.python.modules.batch_norm_v2 import BatchNormV2
 from sonnet.python.modules.clip_gradient import clip_gradient
 from sonnet.python.modules.conv import CAUSAL
 from sonnet.python.modules.conv import CausalConv1D
+from sonnet.python.modules.conv import CONSTANT_PADDING
 from sonnet.python.modules.conv import Conv1D
 from sonnet.python.modules.conv import Conv1DTranspose
 from sonnet.python.modules.conv import Conv2D
@@ -114,10 +114,12 @@ from sonnet.python.modules.conv import Conv3DTranspose
 from sonnet.python.modules.conv import DepthwiseConv2D
 from sonnet.python.modules.conv import FULL
 from sonnet.python.modules.conv import InPlaneConv2D
+from sonnet.python.modules.conv import REFLECT_PADDING
 from sonnet.python.modules.conv import REVERSE_CAUSAL
 from sonnet.python.modules.conv import SAME
 from sonnet.python.modules.conv import SeparableConv1D
 from sonnet.python.modules.conv import SeparableConv2D
+from sonnet.python.modules.conv import SYMMETRIC_PADDING
 from sonnet.python.modules.conv import VALID
 from sonnet.python.modules.embed import Embed
 from sonnet.python.modules.gated_rnn import BatchNormLSTM
@@ -132,6 +134,9 @@ from sonnet.python.modules.gated_rnn import lstm_with_zoneout
 from sonnet.python.modules.gated_rnn import LSTMBlockCell
 from sonnet.python.modules.gated_rnn import LSTMState
 from sonnet.python.modules.layer_norm import LayerNorm
+from sonnet.python.modules.moving_average import MovingAverage
+from sonnet.python.modules.optimization_constraints import get_lagrange_multiplier
+from sonnet.python.modules.optimization_constraints import OptimizationConstraints
 from sonnet.python.modules.pondering_rnn import ACTCore
 from sonnet.python.modules.relational_memory import RelationalMemory
 from sonnet.python.modules.residual import Residual
@@ -141,12 +146,12 @@ from sonnet.python.modules.rnn_core import RNNCellWrapper
 from sonnet.python.modules.rnn_core import RNNCore
 from sonnet.python.modules.rnn_core import trainable_initial_state
 from sonnet.python.modules.rnn_core import TrainableInitialState
-from sonnet.python.modules.rnn_core import wrap_rnn_cell_class
 from sonnet.python.modules.scale_gradient import scale_gradient
 from sonnet.python.modules.sequential import Sequential
 from sonnet.python.modules.spatial_transformer import AffineGridWarper
 from sonnet.python.modules.spatial_transformer import AffineWarpConstraints
 from sonnet.python.modules.spatial_transformer import GridWarper
+from sonnet.python.modules.spectral_normalization import wrap_with_spectral_norm
 from sonnet.python.modules.util import check_initializers
 from sonnet.python.modules.util import check_partitioners
 from sonnet.python.modules.util import check_regularizers
@@ -171,5 +176,5 @@ from sonnet.python.ops import nest
 from sonnet.python.ops.initializers import restore_initializer
 
 
-__version__ = '1.30'
+__version__ = '1.36'
 

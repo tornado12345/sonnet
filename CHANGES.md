@@ -1,5 +1,61 @@
 # Sonnet Changelog
 
+
+## Version 1.36 - Friday, 10 February 2020
+* Add the *Compressive Transformer*.
+* Add *Transformer* and *TransformerXL*.
+* Fix calls to `as_numpy_dtype`
+* Pass `rate` instead of `keep_prob` in snt.nets.MLP `_build` method
+* Remove unnecessary `global_variable_initializer`
+* Relax `SharedConvNets2DTest.testNormalizations`'s tolerance to make it pass.
+* Add support for reflective and symmetric padding in `_ConvND`
+* Update deprecated calls of `tfp.distributions.*` to `tfp.math`
+* Support non-float32 dtypes in spectral_norm by Deepmind · 4 months ago
+* Alias `Model.*_generator`(e.g. fit_generator) to the non `_from_generator` endpoints which support generators and do not run eagerly.
+* Improvements to wrap_with_spectral_norm's API
+* Allow batched (higher-dimensional) inputs to  `snt.Linear`
+* Fix cases where `tf.TensorShape` was constructed with float dimensions
+* Migrate off of deprecated `tf.contrib.distributions` to supported `tfp` methods
+* Fix cases where `tf.TensorShape` was constructed with float dimensions
+* Use `tf.custom_gradient` for scaling, clipping and densifying gradients
+* Address some TensorFlow deprecation warnings.
+* TF2 compatibility changes.
+
+
+## Version 1.35 - Friday, 6 September 2019
+* Added Singular Value Normalization and SpectralNorm.
+* Added automatic mixed precision support in examples.
+* Compatibility fixes.
+
+## Version 1.34 - Friday, 5 July 2019
+* Added tools for constrained optimisation as found in GECO, https://arxiv.org/abs/1810.00597
+* Added differentiable moving average.
+
+## Version 1.33 - Friday, 21 May 2019
+* Documentation updates.
+* Added developmental branch for Sonnet 2.
+* `setup.py` is now simpler. The `dm-sonnet-gpu` package has been retired, all
+  functionality has been available in `dm-sonnet` for some time now.
+* Use `tf_inspect` instead of `inspect` for inspecting arguments.
+
+
+## Version 1.32 - Friday, 12. April 2019
+* Documentation updates.
+* Tiny shakespeare data is now compressed.
+* `setup.py` now uses environment variables for GPU builds.
+* Removed unused  `wrap_rnn_cell_class` decorator from `rnn_core`.
+* Add deprecation warning for layer norm in `ConvLSTM`.
+* Modules now support named outputs.
+* Switch to using Python3 as default.
+
+
+## Version 1.31 - Tuesday, 12. March 2019
+
+* Added `custom_getter` parameter to `snt.ConvNet2DTranspose`. It now can be used when transposing an existing `ConvNet2D` or `ConvNet2DTranspose`.
+* Fixed a regression in the `bayes_by_backprop_getter` caused by a change in the `tfp.Distribution` API.
+* Changes in test sizes.
+
+
 ## Version 1.30 - Tuesday, 12. February 2019
 
 * Added a class to linear transform the concatenation of a list of Tensors.

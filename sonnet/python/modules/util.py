@@ -27,12 +27,13 @@ import re
 import weakref
 
 # Dependency imports
+from absl import logging
 import six
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 import wrapt
 
-from tensorflow.python.framework import function
-from tensorflow.python.ops import variable_scope as variable_scope_ops
+from tensorflow.python.ops import variable_scope as variable_scope_ops  # pylint: disable=g-direct-tensorflow-import
+from tensorflow.python.util import tf_inspect  # pylint: disable=g-direct-tensorflow-import
 
 
 def get_variable_scope_name(value):
@@ -58,14 +59,15 @@ def get_variable_scope_name(value):
     raise ValueError("Not a variable scope: {}".format(value))
 
 
-def get_variables_in_scope(scope, collection=tf.GraphKeys.TRAINABLE_VARIABLES):
+def get_variables_in_scope(
+    scope, collection=tf.GraphKeys.TRAINABLE_VARIABLES):
   """Returns a tuple `tf.Variable`s in a scope for a given collection.
 
   Args:
     scope: `tf.VariableScope` or string to retrieve variables from.
     collection: Collection to restrict query to. By default this is
-        `tf.Graphkeys.TRAINABLE_VARIABLES`, which doesn't include non-trainable
-        variables such as moving averages.
+        `tf.GraphKeys.TRAINABLE_VARIABLES`, which doesn't
+        include non-trainable variables such as moving averages.
 
   Returns:
     A tuple of `tf.Variable` objects.
@@ -81,8 +83,8 @@ def get_variables_in_scope(scope, collection=tf.GraphKeys.TRAINABLE_VARIABLES):
   return tuple(tf.get_collection(collection, scope_name))
 
 
-def get_variables_in_module(module,
-                            collection=tf.GraphKeys.TRAINABLE_VARIABLES):
+def get_variables_in_module(
+    module, collection=tf.GraphKeys.TRAINABLE_VARIABLES):
   """Returns tuple of `tf.Variable`s declared inside an `snt.Module`.
 
   Note that this operates by searching the variable scope a module contains,
@@ -92,8 +94,8 @@ def get_variables_in_module(module,
   Args:
     module: `snt.Module` instance to query the scope of.
     collection: Collection to restrict query to. By default this is
-      `tf.Graphkeys.TRAINABLE_VARIABLES`, which doesn't include non-trainable
-      variables such as moving averages.
+      `tf.GraphKeys.TRAINABLE_VARIABLES`, which doesn't
+      include non-trainable variables such as moving averages.
 
   Returns:
     A tuple of `tf.Variable` objects.
@@ -368,10 +370,11 @@ def custom_getter_router(custom_getter_map, name_fn):
   return _custom_getter
 
 
-def get_normalized_variable_map(scope_or_module,
-                                collection=tf.GraphKeys.GLOBAL_VARIABLES,
-                                context=None,
-                                group_sliced_variables=True):
+def get_normalized_variable_map(
+    scope_or_module,
+    collection=tf.GraphKeys.GLOBAL_VARIABLES,
+    context=None,
+    group_sliced_variables=True):
   """Builds map of `tf.Variable`s in scope or module with normalized names.
 
   The names of the variables are normalized to remove the scope prefix.
@@ -379,8 +382,8 @@ def get_normalized_variable_map(scope_or_module,
   Args:
     scope_or_module: Scope or module to build map from.
     collection: Collection to restrict query to. By default this is
-        `tf.Graphkeys.GLOBAL_VARIABLES`, which includes non-trainable variables
-        such as moving averages.
+        `tf.GraphKeys.GLOBAL_VARIABLES`, which includes
+        non-trainable variables such as moving averages.
     context: Scope or module, identical to or parent of `scope`. If given, this
         will be used as the stripped prefix. By default `None`, which means
         `context=scope`.
@@ -436,14 +439,15 @@ def get_saver(scope, collections=(tf.GraphKeys.GLOBAL_VARIABLES,),  # pylint: di
   Args:
     scope: Scope or module. Variables within will be saved or restored.
     collections: Sequence of collections of variables to restrict
-        `tf.train.Saver` to. By default this is `tf.GraphKeys.GLOBAL_VARIABLES`
-        which includes moving averages variables as well as trainable variables.
+        `tf.train.Saver` to. By default this is
+        `tf.GraphKeys.GLOBAL_VARIABLES` which includes moving
+        averages variables as well as trainable variables.
     context: Scope or module, identical to or parent of `scope`. If given, this
         will be used as the stripped prefix.
     **kwargs: Extra keyword arguments to pass to tf.train.Saver.
 
   Returns:
-    A `tf.train.Saver` object for Variables in the scope or module.
+      A `tf.train.Saver` object for Variables in the scope or module.
   """
 
   variable_map = {}
@@ -497,7 +501,8 @@ def _get_vars_to_collections(variables):
     for collection_name in list(graph.collections):
       entries = set(entry for entry in graph.get_collection(collection_name)
                     if isinstance(entry, tf.Variable))
-      # For legacy reasons, tf.GraphKeys.GLOBAL_VARIABLES == "variables".
+      # For legacy reasons,
+      #    tf.GraphKeys.GLOBAL_VARIABLES == "variables".
       # Correcting for this here, to avoid confusion.
       if collection_name == tf.GraphKeys.GLOBAL_VARIABLES:
         collection_name = "global_variables"
@@ -533,8 +538,7 @@ def _format_device(var):
 
 def format_variables(variables, join_lines=True):
   """Takes a collection of variables and formats it as a table."""
-  rows = []
-  rows.append(("Variable", "Shape", "Type", "Collections", "Device"))
+  rows = [("Variable", "Shape", "Type", "Collections", "Device")]
   var_to_collections = _get_vars_to_collections(variables)
   for var in sorted(variables, key=lambda var: var.op.name):
     if var.get_shape().is_fully_defined():
@@ -549,8 +553,7 @@ def format_variables(variables, join_lines=True):
 
 def format_variable_map(variable_map, join_lines=True):
   """Takes a key-to-variable map and formats it as a table."""
-  rows = []
-  rows.append(("Key", "Variable", "Shape", "Type", "Collections", "Device"))
+  rows = [("Key", "Variable", "Shape", "Type", "Collections", "Device")]
   var_to_collections = _get_vars_to_collections(variable_map)
 
   sort_key = lambda item: (item[0], item[1].name)
@@ -577,7 +580,7 @@ def log_variables(variables=None):
   if variables is None:
     variables = tf.global_variables() + tf.local_variables()
   for row in format_variables(variables, join_lines=False):
-    tf.logging.info(row)
+    logging.info(row)
 
 
 def _num_bytes_to_human_readable(num_bytes):
@@ -621,10 +624,10 @@ def summarize_variables(variables=None):
     num_bytes = var_info_for_type["num_scalars"] * dtype.size
     total_num_scalars += var_info_for_type["num_scalars"]
     total_num_bytes += num_bytes
-    tf.logging.info("%r: %d variables comprising %d scalars, %s",
-                    dtype, var_info_for_type["num_variables"],
-                    var_info_for_type["num_scalars"],
-                    _num_bytes_to_human_readable(num_bytes))
+    logging.info("%r: %d variables comprising %d scalars, %s",
+                 dtype, var_info_for_type["num_variables"],
+                 var_info_for_type["num_scalars"],
+                 _num_bytes_to_human_readable(num_bytes))
 
 
 def count_variables_by_type(variables=None):
@@ -644,7 +647,7 @@ def count_variables_by_type(variables=None):
   results_dict = {}
   for dtype in unique_types:
     if dtype == tf.string:
-      tf.logging.warning(
+      logging.warning(
           "NB: string Variables present. The memory usage for these  Variables "
           "will not be accurately computed as it depends on the exact strings "
           "stored in a particular session.")
@@ -721,7 +724,7 @@ def reuse_variables(method):
 
   # Ensure that the argument passed in is really a method by checking that the
   # first positional argument to it is "self".
-  arg_spec = inspect.getargspec(method)
+  arg_spec = tf_inspect.getargspec(method)
   is_method = arg_spec.args and arg_spec.args[0] == "self"
 
   if not is_method:
@@ -870,7 +873,7 @@ def reuse_variables(method):
         obj._is_connected = True  # pylint: disable=protected-access
         if not tf.executing_eagerly():
           obj._add_connected_subgraph(  # pylint: disable=protected-access
-              method, out_ops, scope, *args, **kwargs)
+              method, out_ops, scope, args, kwargs)
       except AttributeError:
         pass
     return out_ops
@@ -909,9 +912,7 @@ def to_snake_case(camel_case):
   return underscored.strip("_").lower()
 
 
-@function.Defun(
-    python_grad_func=lambda x, dy: tf.convert_to_tensor(dy),
-    shape_func=lambda op: [op.inputs[0].get_shape()])
+@tf.custom_gradient
 def convert_gradient_to_tensor(x):
   """Identity operation whose gradient is converted to a `Tensor`.
 
@@ -929,7 +930,7 @@ def convert_gradient_to_tensor(x):
   Returns:
     The input `Tensor`.
   """
-  return x
+  return x, tf.convert_to_tensor
 
 
 def sort_by_name(variables):
@@ -945,11 +946,11 @@ def notify_about_new_variables(callback):
   variables to be modified should use `variable_creator_scope` directly and sit
   within the variable creator stack.
 
-  >>> variables = []
-  >>> with notify_about_variables(variables.append):
-  ...   v = tf.Variable(1.0, name='v')
-  ...   w = tf.get_variable('w', [])
-  >>> assert variables == [v, w]
+      >>> variables = []
+      >>> with notify_about_new_variables(variables.append):
+      ...   v = tf.Variable(1.0, name='v')
+      ...   w = tf.get_variable('w', [])
+      >>> assert variables == [v, w]
 
   Args:
     callback: a callable taking a single argument which is a tf.Variable.
@@ -969,7 +970,7 @@ def notify_about_new_variables(callback):
 def deprecation_warning(deprecation_message):
   """Log a warning message the user is using deprecated functionality."""
 
-  tf.logging.log_first_n(tf.logging.WARN, deprecation_message, 1)
+  logging.log_first_n(logging.WARN, deprecation_message, 1)
 
 
 def _recursive_getattr(module, path):
@@ -1075,7 +1076,7 @@ def supports_kwargs(module_or_fn, kwargs_list):
   if not (inspect.isfunction(module_or_fn) or inspect.ismethod(module_or_fn)):
     module_or_fn = module_or_fn.__call__
 
-  arg_spec = inspect.getargspec(module_or_fn)
+  arg_spec = tf_inspect.getargspec(module_or_fn)
 
   # If there is a keywords element, then an arbitrary kwargs will work, as far
   # as we can tell from here.
@@ -1135,4 +1136,3 @@ def remove_unsupported_kwargs(module_or_fn, all_kwargs_dict):
       kwarg: value for kwarg, value in all_kwargs_dict.items()
       if supports_kwargs(module_or_fn, kwarg) != NOT_SUPPORTED
   }
-

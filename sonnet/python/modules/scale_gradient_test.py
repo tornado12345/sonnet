@@ -24,9 +24,10 @@ import itertools
 # Dependency imports
 from absl.testing import parameterized
 import sonnet as snt
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+from tensorflow.contrib.eager.python import tfe as contrib_eager
 
-tfe = tf.contrib.eager
+tfe = contrib_eager
 
 
 class ScaleGradientTest(parameterized.TestCase, tf.test.TestCase):
@@ -47,7 +48,7 @@ class ScaleGradientTest(parameterized.TestCase, tf.test.TestCase):
       if scale == 1.0:
         self.assertEqual(y.op.type, "Identity")
       else:
-        self.assertEqual(y.op.type, "ScaleGradient_float32")
+        self.assertEqual(y.op.type, "IdentityN")
 
       with self.test_session() as sess:
         dydx_, y_ = sess.run([dydx, y], feed_dict={x: [x_]})

@@ -27,9 +27,10 @@ from absl.testing import parameterized
 import numpy as np
 import sonnet as snt
 from sonnet.python.modules import conv
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+from tensorflow.contrib import layers as contrib_layers
 
-from tensorflow.python.ops import variables
+from tensorflow.python.ops import variables  # pylint: disable=g-direct-tensorflow-import
 
 
 def create_constant_initializers(w, b, use_bias):
@@ -264,7 +265,7 @@ class SharedConvTest(parameterized.TestCase, tf.test.TestCase):
     }
 
     if "mask" in module_kwargs:
-      np_dtype = inputs.dtype.as_numpy_dtype()
+      np_dtype = inputs.dtype.as_numpy_dtype
       module_kwargs["mask"] = module_kwargs["mask"].astype(np_dtype)
 
     convolution = module(partitioners=partitioners, **module_kwargs)
@@ -281,9 +282,9 @@ class SharedConvTest(parameterized.TestCase, tf.test.TestCase):
 
     self.assertEqual(convolution_t.partitioners, convolution.partitioners)
 
-  @parameterized.parameters(*itertools.product(modules,
-                                               (True, False),
-                                               (tf.float16, tf.float32)))
+  @parameterized.parameters(
+      *itertools.product(modules, (True, False),
+                         (tf.float16, tf.float32, tf.float64)))
   def testVariables(self, module_info, use_bias, dtype):
     """The correct number of variables are created."""
     module, num_input_dims, module_kwargs = module_info
@@ -294,7 +295,7 @@ class SharedConvTest(parameterized.TestCase, tf.test.TestCase):
     inputs = tf.placeholder(dtype, input_shape)
 
     if "mask" in module_kwargs:
-      np_dtype = dtype.as_numpy_dtype()
+      np_dtype = dtype.as_numpy_dtype
       module_kwargs["mask"] = module_kwargs["mask"].astype(np_dtype)
 
     with tf.variable_scope("scope"):
@@ -377,7 +378,7 @@ class SharedConvTest(parameterized.TestCase, tf.test.TestCase):
     inputs = tf.placeholder(tf.float32, (10,) * (num_input_dims + 2))
 
     if "mask" in module_kwargs:
-      np_dtype = inputs.dtype.as_numpy_dtype()
+      np_dtype = inputs.dtype.as_numpy_dtype
       module_kwargs["mask"] = module_kwargs["mask"].astype(np_dtype)
 
     conv_mod1 = module(**module_kwargs)
@@ -423,8 +424,10 @@ class Conv2DTest(parameterized.TestCase, tf.test.TestCase):
       conv.SUPPORTED_2D_DATA_FORMATS,  # data_format
       conv.ALLOWED_PADDINGS,  # padding_height
       conv.ALLOWED_PADDINGS,  # padding_width
+      conv.ALLOWED_PADDING_VALUES,  # padding_value
   ))
-  def testShapes(self, use_bias, data_format, padding_height, padding_width):
+  def testShapes(self, use_bias, data_format, padding_height, padding_width,
+                 padding_value):
     """The generated shapes are correct with different paddings."""
 
     batch_size = random.randint(1, 100)
@@ -447,6 +450,7 @@ class Conv2DTest(parameterized.TestCase, tf.test.TestCase):
         output_channels=out_channels,
         kernel_shape=[kernel_shape_h, kernel_shape_w],
         padding=[padding_height, padding_width],
+        padding_value=padding_value,
         data_format=data_format,
         stride=1,
         use_bias=use_bias)
@@ -619,7 +623,7 @@ class Conv2DTest(parameterized.TestCase, tf.test.TestCase):
                        initializers=create_constant_initializers(
                            1.0, 1.0, use_bias))
 
-    for dtype in (tf.uint32, tf.float64):
+    for dtype in (tf.uint32, tf.uint64):
       x = tf.constant(np.ones([1, 5, 5, 1]), dtype=dtype)
       err = "Input must have dtype tf.float.*"
       with self.assertRaisesRegexp(TypeError, err):
@@ -682,8 +686,8 @@ class Conv2DTest(parameterized.TestCase, tf.test.TestCase):
       ("WithBias", True),
       ("WithoutBias", False))
   def testRegularizersInRegularizationLosses(self, use_bias):
-    regularizers = create_regularizers(
-        use_bias, tf.contrib.layers.l1_regularizer(scale=0.5))
+    regularizers = create_regularizers(use_bias,
+                                       contrib_layers.l1_regularizer(scale=0.5))
 
     conv1 = snt.Conv2D(
         output_channels=1,
@@ -694,13 +698,15 @@ class Conv2DTest(parameterized.TestCase, tf.test.TestCase):
         name="conv1")
     conv1(tf.placeholder(tf.float32, [1, 10, 10, 2]))
 
-    graph_regularizers = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+    graph_regularizers = tf.get_collection(
+        tf.GraphKeys.REGULARIZATION_LOSSES)
     self.assertRegexpMatches(graph_regularizers[0].name, ".*l1_regularizer.*")
     if use_bias:
       self.assertRegexpMatches(graph_regularizers[1].name, ".*l1_regularizer.*")
 
   @parameterized.parameters(*itertools.product(
       [True, False],  # use_bias
+      [snt.CONSTANT_PADDING],  # padding_value
       # (padding_h, padding_w, expected_out):
       [(snt.VALID, snt.VALID, [[9, 9, 9],
                                [9, 9, 9],
@@ -738,7 +744,7 @@ class Conv2DTest(parameterized.TestCase, tf.test.TestCase):
                                        [9, 9, 9, 6, 3],
                                        [6, 6, 6, 4, 2]])],
   ))
-  def testComputation(self, use_bias, padding_and_expected_out):
+  def testComputation(self, use_bias, padding_value, padding_and_expected_out):
     """Run through for something with a known answer using different args."""
     padding_h, padding_w, expected_out = padding_and_expected_out
     conv1 = snt.Conv2D(
@@ -746,6 +752,7 @@ class Conv2DTest(parameterized.TestCase, tf.test.TestCase):
         kernel_shape=3,
         stride=1,
         padding=(padding_h, padding_w),
+        padding_value=padding_value,
         name="conv1",
         use_bias=use_bias,
         initializers=create_constant_initializers(1.0, 1.0, use_bias))
@@ -760,6 +767,119 @@ class Conv2DTest(parameterized.TestCase, tf.test.TestCase):
       tf.variables_initializer(
           [conv1.w, conv1.b] if use_bias else [conv1.w]).run()
 
+      self.assertAllClose(out.eval(), expected_out)
+
+  @parameterized.parameters(*itertools.product(
+      # (padding_h, padding_w, padding_value, expected_out):
+      # pylint:disable=bad-whitespace
+      [(snt.VALID, snt.VALID, snt.CONSTANT_PADDING, [[26, 28, 23],
+                                                     [29, 31, 26],
+                                                     [25, 27, 29]]),
+       (snt.VALID, snt.VALID, snt.REFLECT_PADDING, [[26, 28, 23],
+                                                    [29, 31, 26],
+                                                    [25, 27, 29]]),
+       (snt.VALID, snt.VALID, snt.SYMMETRIC_PADDING, [[26, 28, 23],
+                                                      [29, 31, 26],
+                                                      [25, 27, 29]]),
+       (snt.SAME, snt.SAME, snt.CONSTANT_PADDING, [[12, 14, 13, 12, 10],
+                                                   [19, 26, 28, 23, 16],
+                                                   [21, 29, 31, 26, 18],
+                                                   [16, 25, 27, 29, 20],
+                                                   [ 9, 13, 12, 18, 14]]),
+       (snt.SAME, snt.SAME, snt.REFLECT_PADDING, [[36, 25, 20, 15, 18],
+                                                  [30, 26, 28, 23, 26],
+                                                  [33, 29, 31, 26, 29],
+                                                  [22, 25, 27, 29, 32],
+                                                  [16, 19, 21, 30, 33]]),
+       (snt.SAME, snt.SAME, snt.SYMMETRIC_PADDING, [[18, 17, 19, 21, 27],
+                                                    [27, 26, 28, 23, 22],
+                                                    [30, 29, 31, 26, 25],
+                                                    [26, 25, 27, 29, 28],
+                                                    [28, 20, 15, 24, 30]]),
+       (snt.REVERSE_CAUSAL, snt.REVERSE_CAUSAL, snt.CONSTANT_PADDING,
+        [[26, 28, 23, 16, 6],
+         [29, 31, 26, 18, 7],
+         [25, 27, 29, 20, 8],
+         [13, 12, 18, 14, 8],
+         [ 7,  3,  6,  5, 3]]),
+       (snt.REVERSE_CAUSAL, snt.REVERSE_CAUSAL, snt.REFLECT_PADDING,
+        [[26, 28, 23, 26, 23],
+         [29, 31, 26, 29, 26],
+         [25, 27, 29, 32, 29],
+         [19, 21, 30, 33, 30],
+         [25, 27, 29, 32, 29]]),
+       (snt.REVERSE_CAUSAL, snt.REVERSE_CAUSAL, snt.SYMMETRIC_PADDING,
+        [[26, 28, 23, 22, 22],
+         [29, 31, 26, 25, 25],
+         [25, 27, 29, 28, 28],
+         [20, 15, 24, 30, 30],
+         [20, 15, 24, 30, 30]]),
+       (snt.FULL, snt.FULL, snt.CONSTANT_PADDING,
+        [[ 0,  1,  3,  6,  9,  7,  4],
+         [ 5, 12, 14, 13, 12, 10,  6],
+         [ 8, 19, 26, 28, 23, 16,  6],
+         [ 9, 21, 29, 31, 26, 18,  7],
+         [10, 16, 25, 27, 29, 20,  8],
+         [ 7,  9, 13, 12, 18, 14,  8],
+         [ 6,  6,  7,  3,  6,  5,  3]]),
+       (snt.FULL, snt.FULL, snt.REFLECT_PADDING,
+        [[26, 30, 26, 28, 23, 26, 23],
+         [25, 36, 25, 20, 15, 18, 15],
+         [26, 30, 26, 28, 23, 26, 23],
+         [29, 33, 29, 31, 26, 29, 26],
+         [25, 22, 25, 27, 29, 32, 29],
+         [19, 16, 19, 21, 30, 33, 30],
+         [25, 22, 25, 27, 29, 32, 29]]),
+       (snt.FULL, snt.FULL, snt.SYMMETRIC_PADDING,
+        [[18, 18, 17, 19, 21, 27, 27],
+         [18, 18, 17, 19, 21, 27, 27],
+         [27, 27, 26, 28, 23, 22, 22],
+         [30, 30, 29, 31, 26, 25, 25],
+         [26, 26, 25, 27, 29, 28, 28],
+         [28, 28, 20, 15, 24, 30, 30],
+         [28, 28, 20, 15, 24, 30, 30]]),
+       (snt.CAUSAL, snt.CAUSAL, snt.CONSTANT_PADDING, [[ 0,  1,  3,  6,  9],
+                                                       [ 5, 12, 14, 13, 12],
+                                                       [ 8, 19, 26, 28, 23],
+                                                       [ 9, 21, 29, 31, 26],
+                                                       [10, 16, 25, 27, 29]]),
+       (snt.CAUSAL, snt.CAUSAL, snt.REFLECT_PADDING, [[26, 30, 26, 28, 23],
+                                                      [25, 36, 25, 20, 15],
+                                                      [26, 30, 26, 28, 23],
+                                                      [29, 33, 29, 31, 26],
+                                                      [25, 22, 25, 27, 29]]),
+       (snt.CAUSAL, snt.CAUSAL, snt.SYMMETRIC_PADDING, [[18, 18, 17, 19, 21],
+                                                        [18, 18, 17, 19, 21],
+                                                        [27, 27, 26, 28, 23],
+                                                        [30, 30, 29, 31, 26],
+                                                        [26, 26, 25, 27, 29]]),
+      ],
+  ))
+  def testPaddingValues(self, padding_and_expected_out):
+    """Run through for something with a known answer using different args."""
+    padding_h, padding_w, padding_value, expected_out = padding_and_expected_out
+    conv1 = snt.Conv2D(
+        output_channels=1,
+        kernel_shape=3,
+        stride=1,
+        padding=(padding_h, padding_w),
+        padding_value=padding_value,
+        name="conv1",
+        use_bias=False,
+        initializers=create_constant_initializers(1.0, 1.0, False))
+
+    # Make a less trivial input test tensor.
+    in_tensor = np.arange(5 * 5).reshape([1, 5, 5, 1])
+    # Do modulo 7 to not have large output values.
+    in_tensor = in_tensor % 7
+
+    out = conv1(tf.constant(in_tensor, dtype=np.float32))
+    out = tf.squeeze(out, axis=(0, 3))
+
+    expected_out = np.asarray(expected_out, dtype=np.float32)
+
+    with self.test_session():
+      tf.variables_initializer([conv1.w]).run()
       self.assertAllClose(out.eval(), expected_out)
 
   @parameterized.named_parameters(
@@ -879,9 +999,9 @@ class Conv2DTest(parameterized.TestCase, tf.test.TestCase):
     self.assertEqual(net.output_channels, clone1.output_channels)
     self.assertEqual(net.module_name + "_clone", clone1.module_name)
     self.assertEqual("clone2", clone2.module_name)
-    self.assertEqual(len(all_vars), 3*len(net_vars))
-    self.assertEqual(len(net_vars), len(clone1_vars))
-    self.assertEqual(len(net_vars), len(clone2_vars))
+    self.assertLen(all_vars, 3*len(net_vars))
+    self.assertLen(net_vars, len(clone1_vars))
+    self.assertLen(net_vars, len(clone2_vars))
     self.assertEqual(net_out.get_shape().as_list(),
                      clone1_out.get_shape().as_list())
     self.assertEqual(net_out.get_shape().as_list(),
@@ -1254,7 +1374,7 @@ class Conv2DTransposeTest(parameterized.TestCase, tf.test.TestCase):
     # transpose convolution!)
     err = "Variables in conv2_transpose_transpose not instantiated yet"
     with self.assertRaisesRegexp(snt.NotConnectedError, err):
-      self.assertEqual(conv2_transpose.output_shape, conv2.input_shape)
+      _ = conv2.input_shape
 
   @parameterized.named_parameters(
       ("WithBiasWithOutputShape", True, True),
@@ -1307,7 +1427,7 @@ class Conv2DTransposeTest(parameterized.TestCase, tf.test.TestCase):
     # transpose convolution!)
     err = "Variables in conv2_transpose_transpose not instantiated yet"
     with self.assertRaisesRegexp(snt.NotConnectedError, err):
-      self.assertEqual(conv2_transpose.output_shape, conv2.input_shape)
+      _ = conv2.input_shape
 
 
 class Conv1DTest(parameterized.TestCase, tf.test.TestCase):
@@ -1481,7 +1601,7 @@ class Conv1DTest(parameterized.TestCase, tf.test.TestCase):
                        initializers=create_constant_initializers(
                            1.0, 1.0, use_bias))
 
-    for dtype in (tf.uint32, tf.float64):
+    for dtype in (tf.uint32, tf.uint64):
       x = tf.constant(np.ones([1, 5, 1]), dtype=dtype)
       err = "Input must have dtype tf.float.*"
       with self.assertRaisesRegexp(TypeError, err):
@@ -1550,8 +1670,8 @@ class Conv1DTest(parameterized.TestCase, tf.test.TestCase):
       ("WithBias", True),
       ("WithoutBias", False))
   def testRegularizersInRegularizationLosses(self, use_bias):
-    regularizers = create_regularizers(
-        use_bias, tf.contrib.layers.l1_regularizer(scale=0.5))
+    regularizers = create_regularizers(use_bias,
+                                       contrib_layers.l1_regularizer(scale=0.5))
 
     conv1 = snt.Conv1D(
         output_channels=1,
@@ -1561,7 +1681,8 @@ class Conv1DTest(parameterized.TestCase, tf.test.TestCase):
         name="conv1")
     conv1(tf.placeholder(tf.float32, [1, 10, 2]))
 
-    graph_regularizers = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+    graph_regularizers = tf.get_collection(
+        tf.GraphKeys.REGULARIZATION_LOSSES)
     self.assertRegexpMatches(graph_regularizers[0].name, ".*l1_regularizer.*")
     if use_bias:
       self.assertRegexpMatches(graph_regularizers[1].name, ".*l1_regularizer.*")
@@ -1763,9 +1884,9 @@ class Conv1DTest(parameterized.TestCase, tf.test.TestCase):
     self.assertEqual(net.output_channels, clone1.output_channels)
     self.assertEqual(net.module_name + "_clone", clone1.module_name)
     self.assertEqual("clone2", clone2.module_name)
-    self.assertEqual(len(all_vars), 3*len(net_vars))
-    self.assertEqual(len(net_vars), len(clone1_vars))
-    self.assertEqual(len(net_vars), len(clone2_vars))
+    self.assertLen(all_vars, 3*len(net_vars))
+    self.assertLen(net_vars, len(clone1_vars))
+    self.assertLen(net_vars, len(clone2_vars))
     self.assertEqual(net_out.get_shape().as_list(),
                      clone1_out.get_shape().as_list())
     self.assertEqual(net_out.get_shape().as_list(),
@@ -1973,7 +2094,7 @@ class Conv1DTransposeTest(parameterized.TestCase, tf.test.TestCase):
         name="conv1",
         use_bias=use_bias)
 
-    for dtype in (tf.uint32, tf.float64):
+    for dtype in (tf.uint32, tf.uint64):
       x = tf.constant(np.ones([batch_size, in_length,
                                in_channels]), dtype=dtype)
       err = "Input must have dtype tf.float.*"
@@ -2065,7 +2186,7 @@ class Conv1DTransposeTest(parameterized.TestCase, tf.test.TestCase):
     # transpose convolution!)
     err = "Variables in conv1_transpose_transpose not instantiated yet"
     with self.assertRaisesRegexp(snt.NotConnectedError, err):
-      self.assertEqual(conv1_transpose.output_shape, conv1.input_shape)
+      _ = conv1.input_shape
 
   @parameterized.parameters(
       *zip(batch_size, in_length, in_channels, out_channels, kernel_shape,
@@ -2112,7 +2233,7 @@ class Conv1DTransposeTest(parameterized.TestCase, tf.test.TestCase):
     # transpose convolution!)
     err = "Variables in conv1_transpose_transpose not instantiated yet"
     with self.assertRaisesRegexp(snt.NotConnectedError, err):
-      self.assertEqual(conv1_transpose.output_shape, conv1.input_shape)
+      _ = conv1.input_shape
 
   def testInitializerMutation(self):
     """Test that initializers are not mutated."""
@@ -2281,9 +2402,9 @@ class CausalConv1DTest(parameterized.TestCase, tf.test.TestCase):
     self.assertEqual(net.output_channels, clone1.output_channels)
     self.assertEqual(net.module_name + "_clone", clone1.module_name)
     self.assertEqual("clone2", clone2.module_name)
-    self.assertEqual(len(all_vars), 3*len(net_vars))
-    self.assertEqual(len(net_vars), len(clone1_vars))
-    self.assertEqual(len(net_vars), len(clone2_vars))
+    self.assertLen(all_vars, 3*len(net_vars))
+    self.assertLen(net_vars, len(clone1_vars))
+    self.assertLen(net_vars, len(clone2_vars))
     self.assertEqual(net_out.get_shape().as_list(),
                      clone1_out.get_shape().as_list())
     self.assertEqual(net_out.get_shape().as_list(),
@@ -2481,7 +2602,7 @@ class DepthwiseConv2DTest(parameterized.TestCase, tf.test.TestCase):
         use_bias=use_bias,
         initializers=create_constant_initializers(1.0, 1.0, use_bias))
 
-    for dtype in (tf.uint32, tf.float64):
+    for dtype in (tf.uint32, tf.uint64):
       x = tf.constant(np.ones([1, 5, 5, 1]), dtype=dtype)
       err = "Input must have dtype tf.float.*"
       with self.assertRaisesRegexp(TypeError, err):
@@ -2528,8 +2649,8 @@ class DepthwiseConv2DTest(parameterized.TestCase, tf.test.TestCase):
       ("WithBias", True),
       ("WithoutBias", False))
   def testRegularizersInRegularizationLosses(self, use_bias):
-    regularizers = create_regularizers(
-        use_bias, tf.contrib.layers.l1_regularizer(scale=0.5))
+    regularizers = create_regularizers(use_bias,
+                                       contrib_layers.l1_regularizer(scale=0.5))
 
     conv1 = snt.DepthwiseConv2D(
         channel_multiplier=3,
@@ -2540,7 +2661,8 @@ class DepthwiseConv2DTest(parameterized.TestCase, tf.test.TestCase):
         name="conv1")
     conv1(tf.placeholder(tf.float32, [1, 10, 10, 2]))
 
-    graph_regularizers = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+    graph_regularizers = tf.get_collection(
+        tf.GraphKeys.REGULARIZATION_LOSSES)
     self.assertRegexpMatches(graph_regularizers[0].name, ".*l1_regularizer.*")
     if use_bias:
       self.assertRegexpMatches(graph_regularizers[1].name, ".*l1_regularizer.*")
@@ -2820,7 +2942,7 @@ class SeparableConv2DTest(parameterized.TestCase, tf.test.TestCase):
         initializers=create_separable_constant_initializers(
             1.0, 1.0, 1.0, use_bias))
 
-    for dtype in (tf.uint32, tf.float64):
+    for dtype in (tf.uint32, tf.uint64):
       x = tf.constant(np.ones([1, 5, 5, 1]), dtype=dtype)
       err = "Input must have dtype tf.float.*"
       with self.assertRaisesRegexp(TypeError, err):
@@ -2892,7 +3014,7 @@ class SeparableConv2DTest(parameterized.TestCase, tf.test.TestCase):
       ("WithoutBias", False))
   def testRegularizersInRegularizationLosses(self, use_bias):
     regularizers = create_separable_regularizers(
-        use_bias, tf.contrib.layers.l1_regularizer(scale=0.5))
+        use_bias, contrib_layers.l1_regularizer(scale=0.5))
 
     conv1 = snt.SeparableConv2D(
         output_channels=3,
@@ -2904,7 +3026,8 @@ class SeparableConv2DTest(parameterized.TestCase, tf.test.TestCase):
         name="conv1")
     conv1(tf.placeholder(tf.float32, [10, 10, 1, 2]))
 
-    graph_regularizers = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+    graph_regularizers = tf.get_collection(
+        tf.GraphKeys.REGULARIZATION_LOSSES)
     self.assertRegexpMatches(graph_regularizers[0].name, ".*l1_regularizer.*")
     self.assertRegexpMatches(graph_regularizers[1].name, ".*l1_regularizer.*")
     if use_bias:
@@ -3251,7 +3374,7 @@ class SeparableConv1DTest(parameterized.TestCase, tf.test.TestCase):
         initializers=create_separable_constant_initializers(
             1.0, 1.0, 1.0, use_bias))
 
-    for dtype in (tf.uint32, tf.float64):
+    for dtype in (tf.uint32, tf.uint64):
       x = tf.constant(np.ones([1, 5, 1]), dtype=dtype)
       err = "Input must have dtype tf.float.*"
       with self.assertRaisesRegexp(TypeError, err):
@@ -3323,7 +3446,7 @@ class SeparableConv1DTest(parameterized.TestCase, tf.test.TestCase):
       ("WithoutBias", False))
   def testRegularizersInRegularizationLosses(self, use_bias):
     regularizers = create_separable_regularizers(
-        use_bias, tf.contrib.layers.l1_regularizer(scale=0.5))
+        use_bias, contrib_layers.l1_regularizer(scale=0.5))
 
     conv1 = snt.SeparableConv1D(
         output_channels=3,
@@ -3335,7 +3458,8 @@ class SeparableConv1DTest(parameterized.TestCase, tf.test.TestCase):
         name="conv1")
     conv1(tf.placeholder(tf.float32, [10, 1, 2]))
 
-    graph_regularizers = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+    graph_regularizers = tf.get_collection(
+        tf.GraphKeys.REGULARIZATION_LOSSES)
     self.assertRegexpMatches(graph_regularizers[0].name, ".*l1_regularizer.*")
     self.assertRegexpMatches(graph_regularizers[1].name, ".*l1_regularizer.*")
     if use_bias:
@@ -3418,7 +3542,7 @@ class SeparableConv1DTest(parameterized.TestCase, tf.test.TestCase):
             1.0, 1.0, 1.0, use_bias))
 
     out = conv1(tf.constant(np.ones([1, 5, 1], dtype=np.float32)))
-    expected_out = np.array([[[4.], [4.], [4.]]])
+    expected_out = np.array([[[4], [4], [4]]])
     if not use_bias:
       expected_out -= 1
 
@@ -3681,7 +3805,7 @@ class Conv3DTest(parameterized.TestCase, tf.test.TestCase):
                            "b": tf.constant_initializer(1.0),
                        })
 
-    for dtype in (tf.uint32, tf.float64):
+    for dtype in (tf.uint32, tf.uint64):
       x = tf.constant(np.ones([1, 5, 5, 5, 1]), dtype=dtype)
       self.assertRaisesRegexp(TypeError, "Input must have dtype tf.float.*",
                               conv1, x)
@@ -3759,8 +3883,8 @@ class Conv3DTest(parameterized.TestCase, tf.test.TestCase):
       ("WithBias", True),
       ("WithoutBias", False))
   def testRegularizersInRegularizationLosses(self, use_bias):
-    regularizers = create_regularizers(
-        use_bias, tf.contrib.layers.l1_regularizer(scale=0.5))
+    regularizers = create_regularizers(use_bias,
+                                       contrib_layers.l1_regularizer(scale=0.5))
 
     conv1 = snt.Conv3D(
         output_channels=1,
@@ -3771,7 +3895,8 @@ class Conv3DTest(parameterized.TestCase, tf.test.TestCase):
         name="conv1")
     conv1(tf.placeholder(tf.float32, [1, 10, 10, 10, 2]))
 
-    graph_regularizers = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+    graph_regularizers = tf.get_collection(
+        tf.GraphKeys.REGULARIZATION_LOSSES)
     self.assertRegexpMatches(graph_regularizers[0].name, ".*l1_regularizer.*")
     if use_bias:
       self.assertRegexpMatches(graph_regularizers[1].name, ".*l1_regularizer.*")
@@ -4067,9 +4192,9 @@ class Conv3DTest(parameterized.TestCase, tf.test.TestCase):
     self.assertEqual(net.output_channels, clone1.output_channels)
     self.assertEqual(net.module_name + "_clone", clone1.module_name)
     self.assertEqual("clone2", clone2.module_name)
-    self.assertEqual(len(all_vars), 3*len(net_vars))
-    self.assertEqual(len(net_vars), len(clone1_vars))
-    self.assertEqual(len(net_vars), len(clone2_vars))
+    self.assertLen(all_vars, 3*len(net_vars))
+    self.assertLen(net_vars, len(clone1_vars))
+    self.assertLen(net_vars, len(clone2_vars))
     self.assertEqual(net_out.get_shape().as_list(),
                      clone1_out.get_shape().as_list())
     self.assertEqual(net_out.get_shape().as_list(),
@@ -4294,7 +4419,7 @@ class Conv3DTransposeTest(parameterized.TestCase, tf.test.TestCase):
     # transpose convolution!)
     err = "Variables in conv3_transpose_transpose not instantiated yet"
     with self.assertRaisesRegexp(snt.NotConnectedError, err):
-      self.assertEqual(conv3_transpose.output_shape, conv3.input_shape)
+      _ = conv3.input_shape
 
   @parameterized.named_parameters(
       ("WithBias", True),
@@ -4340,7 +4465,7 @@ class Conv3DTransposeTest(parameterized.TestCase, tf.test.TestCase):
     # transpose convolution!)
     err = "Variables in conv3_transpose_transpose not instantiated yet"
     with self.assertRaisesRegexp(snt.NotConnectedError, err):
-      self.assertEqual(conv3_transpose.output_shape, conv3.input_shape)
+      _ = conv3.input_shape
 
 if __name__ == "__main__":
   tf.test.main()

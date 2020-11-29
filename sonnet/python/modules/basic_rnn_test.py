@@ -27,12 +27,14 @@ import mock
 import numpy as np
 from six.moves import xrange  # pylint: disable=redefined-builtin
 import sonnet as snt
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+from tensorflow.contrib import rnn as contrib_rnn
+from tensorflow.contrib.eager.python import tfe as contrib_eager
 
-from tensorflow.python.ops import variables
+from tensorflow.python.ops import variables  # pylint: disable=g-direct-tensorflow-import
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class VanillaRNNTest(tf.test.TestCase):
 
   def setUp(self):
@@ -233,11 +235,12 @@ class VanillaRNNTest(tf.test.TestCase):
                                  hidden_size=self.hidden_size,
                                  regularizers=valid_regularizers)
     vanilla_rnn(inputs, prev_state)
-    regularizers = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+    regularizers = tf.get_collection(
+        tf.GraphKeys.REGULARIZATION_LOSSES)
     self.assertEqual(len(regularizers), 2)
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class DeepRNNTest(tf.test.TestCase, parameterized.TestCase):
 
   def testShape(self):
@@ -345,7 +348,7 @@ class DeepRNNTest(tf.test.TestCase, parameterized.TestCase):
                     "`snt.RNNCore`s, which is not supported"):
       snt.DeepRNN(cores, name="deep_rnn", skip_connections=True)
 
-    cells = [tf.contrib.rnn.BasicLSTMCell(5), tf.contrib.rnn.BasicLSTMCell(5)]
+    cells = [contrib_rnn.BasicLSTMCell(5), contrib_rnn.BasicLSTMCell(5)]
     with self.assertRaisesRegexp(
         ValueError, "skip_connections are enabled but not all cores are "
         "`snt.RNNCore`s, which is not supported"):
@@ -405,7 +408,7 @@ class DeepRNNTest(tf.test.TestCase, parameterized.TestCase):
     # Have to retrieve the modules from the cores individually.
     deep_rnn_variables = tuple(itertools.chain.from_iterable(
         [c.get_variables() for c in cores]))
-    self.assertEqual(len(deep_rnn_variables), 4 * len(cores),
+    self.assertEqual(len(deep_rnn_variables), 4 * len(cores),  # pylint: disable=g-generic-assert
                      "Cores should have %d variables" % (4 * len(cores)))
     for v in deep_rnn_variables:
       self.assertRegexpMatches(
@@ -677,10 +680,11 @@ class DeepRNNTest(tf.test.TestCase, parameterized.TestCase):
                     "so inferred output size", first_call_args[0])
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class ModelRNNTest(tf.test.TestCase):
 
   def setUp(self):
+    super(ModelRNNTest, self).setUp()
     self.batch_size = 3
     self.hidden_size = 4
     self.model = snt.Module(name="model", build=tf.identity)
@@ -709,7 +713,6 @@ class ModelRNNTest(tf.test.TestCase):
 
     outputs, next_state = model_rnn(inputs, prev_state)
 
-    self.evaluate(tf.global_variables_initializer())
     outputs_value = self.evaluate([outputs, next_state])
     outputs_value, next_state_value = outputs_value
 
@@ -723,7 +726,7 @@ class ModelRNNTest(tf.test.TestCase):
       snt.ModelRNN(np.array([42]))
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class BidirectionalRNNTest(tf.test.TestCase):
 
   toy_out = collections.namedtuple("toy_out", ("out_one", "out_two"))
@@ -757,6 +760,7 @@ class BidirectionalRNNTest(tf.test.TestCase):
                                           self._wrapped_lstm.output_size)
 
   def setUp(self):
+    super(BidirectionalRNNTest, self).setUp()
     self.seq_len = 8
     self.feature_size = 12
     self.batch_size = 5

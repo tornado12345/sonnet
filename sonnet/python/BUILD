@@ -18,11 +18,7 @@ py_library(
     ],
     data = ["//sonnet/protos:module_pb2"],
     srcs_version = "PY2AND3",
-    deps = [
-        ":util",
-        # tensorflow dep,
-        # wrapt dep,
-    ],
+    deps = [":util"],
 )
 
 py_library(
@@ -33,7 +29,6 @@ py_library(
         ":base",
         ":nest",
         ":util",
-        # tensorflow dep,
     ],
 )
 
@@ -71,12 +66,15 @@ py_library(
         "modules/embed.py",
         "modules/gated_rnn.py",
         "modules/layer_norm.py",
+        "modules/moving_average.py",
         "modules/nets/__init__.py",
         "modules/nets/alexnet.py",
         "modules/nets/convnet.py",
         "modules/nets/dilation.py",
         "modules/nets/mlp.py",
+        "modules/nets/transformer.py",
         "modules/nets/vqvae.py",
+        "modules/optimization_constraints.py",
         "modules/pondering_rnn.py",
         "modules/relational_memory.py",
         "modules/residual.py",
@@ -84,6 +82,7 @@ py_library(
         "modules/scale_gradient.py",
         "modules/sequential.py",
         "modules/spatial_transformer.py",
+        "modules/spectral_normalization.py",
     ],
     srcs_version = "PY2AND3",
     deps = [
@@ -91,10 +90,6 @@ py_library(
         ":basic",
         ":nest",
         ":util",
-        # numpy dep,
-        # six dep,
-        # tensorflow dep,
-        # wrapt dep,
     ],
 )
 
@@ -103,7 +98,7 @@ py_library(
     srcs = ["modules/util.py"],
     srcs_version = "PY2AND3",
     deps = [
-        # contextlib2 dep,
+        # absl/logging dep,
         # six dep,
         # tensorflow dep,
         # wrapt dep,
@@ -114,9 +109,6 @@ py_library(
     name = "nest",
     srcs = ["ops/nest.py"],
     srcs_version = "PY2AND3",
-    deps = [
-        # tensorflow dep,
-    ],
 )
 
 py_library(
@@ -143,14 +135,13 @@ py_library(
 )
 
 module_tests = [
-    ("alexnet_test", "nets/", "large"),
     ("attention_test", "", "small"),
     ("base_test", "", "small"),
     ("base_info_test", "", "small"),
     ("basic_test", "", "small"),
     ("basic_rnn_test", "", "medium"),
     ("batch_norm_test", "", "medium"),
-    ("batch_norm_v2_test", "", "small"),
+    ("batch_norm_v2_test", "", "medium"),
     ("layer_norm_test", "", "small"),
     ("block_matrix_test", "", "small"),
     ("clip_gradient_test", "", "small"),
@@ -159,7 +150,9 @@ module_tests = [
     ("dilation_test", "nets/", "medium"),
     ("embed_test", "", "small"),
     ("gated_rnn_test", "", "medium"),
-    ("mlp_test", "nets/", "small"),
+    ("moving_average_test", "", "small"),
+    ("mlp_test", "nets/", "medium"),
+    ("optimization_constraints_test", "", "small"),
     ("pondering_rnn_test", "", "small"),
     ("relational_memory_test", "", "medium"),
     ("rnn_core_test", "", "small"),
@@ -167,6 +160,7 @@ module_tests = [
     ("scale_gradient_test", "", "small"),
     ("sequential_test", "", "small"),
     ("spatial_transformer_test", "", "small"),
+    ("spectral_normalization_test", "", "small"),
     ("util_test", "", "small"),
     ("vqvae_test", "nets/", "small"),
 ]
@@ -178,10 +172,8 @@ module_tests = [
     srcs_version = "PY2AND3",
     deps = [
         # absl/testing:parameterized dep,
-        # mox dep,
         # numpy dep,
         "//sonnet",
-        # tensorflow dep,
     ],
 ) for test_name, test_subdir, test_size in module_tests]
 
@@ -194,6 +186,20 @@ py_test(
         "nomsan",  # Relies on the precompiled library libcuda, which is incompatible with MSan.
         "notap",
         "requires-gpu-sm35",
+    ],
+    deps = [
+        # absl/testing:parameterized dep,
+        "//sonnet",
+    ],
+)
+
+py_test(
+    name = "alexnet_test",
+    size = "large",
+    srcs = ["modules/nets/alexnet_test.py"],
+    srcs_version = "PY2AND3",
+    tags = [
+        "notsan",  # OOM on Forge under TSAN
     ],
     deps = [
         # absl/testing:parameterized dep,
@@ -220,6 +226,18 @@ py_test(
     srcs_version = "PY2AND3",
     deps = [
         ":initializers",
+        # numpy dep,
+        "//sonnet",
+        # tensorflow dep,
+    ],
+)
+
+py_test(
+    name = "transformer_test",
+    size = "large",
+    srcs = ["modules/nets/transformer_test.py"],
+    srcs_version = "PY2AND3",
+    deps = [
         # numpy dep,
         "//sonnet",
         # tensorflow dep,

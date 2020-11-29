@@ -36,7 +36,7 @@ import contextlib2
 import six
 from sonnet.python.modules import base_info
 from sonnet.python.modules import util
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 import wrapt
 
 # Import error class from base_errors for backward compatibility.
@@ -50,6 +50,7 @@ from sonnet.python.modules.base_errors import NotSupportedError
 from sonnet.python.modules.base_errors import NotInitializedError
 from sonnet.python.modules.base_errors import DifferentGraphError
 from sonnet.python.modules.base_errors import ModuleInfoError
+from tensorflow.contrib.eager.python import tfe as contrib_eager
 # pylint: enable=g-bad-import-order
 # pylint: enable=unused-import
 
@@ -174,10 +175,11 @@ class AbstractModule(object):
     else:
       self._custom_getter = custom_getter
 
-    self._template = tf.make_template(name,
-                                      self._build_wrapper,
-                                      create_scope_now_=True,
-                                      custom_getter_=self._custom_getter)
+    self._template = tf.make_template(
+        name,
+        self._build_wrapper,
+        create_scope_now_=True,
+        custom_getter_=self._custom_getter)
 
     self._original_name = name
     self._unique_name = self._template.variable_scope.name.split("/")[-1]
@@ -352,15 +354,15 @@ class AbstractModule(object):
       parent_module._all_variables.update(self._all_variables)  # pylint: disable=protected-access
 
   def _add_connected_subgraph(self, call_method, outputs, subgraph_name_scope,
-                              *inputs_args, **inputs_kwargs):
+                              inputs_args, inputs_kwargs):
     """Adds a newly connected subgraph.
 
     Args:
       call_method: the function used to connect this Sonnet module to the graph.
       outputs: `call_method` outputs.
       subgraph_name_scope: name scope of the newly connected subgraph.
-      *inputs_args: `self._build` inputs `*args`.
-      **inputs_kwargs: `self._build` inputs `*kwargs`.
+      inputs_args: `self._build` inputs `*args`.
+      inputs_kwargs: `self._build` inputs `*kwargs`.
     """
     build_inputs = inspect.getcallargs(call_method,
                                        *inputs_args, **inputs_kwargs)
@@ -390,7 +392,7 @@ class AbstractModule(object):
     """Wraps this modules call method in a callable graph function."""
     if not self._defun_wrapped:
       self._defun_wrapped = True
-      self._call = tf.contrib.eager.defun(self._call)
+      self._call = contrib_eager.defun(self._call)
 
   def __call__(self, *args, **kwargs):
     return self._call(*args, **kwargs)
@@ -422,7 +424,7 @@ class AbstractModule(object):
       # mode (for each training step) and so we don't keep track of connected
       # subgraphs (since there will be orders of magnitude more of them).
       self._add_connected_subgraph(self._build, outputs, subgraph_name_scope,
-                                   *args, **kwargs)
+                                   args, kwargs)
     return outputs
 
   @property
@@ -635,7 +637,8 @@ class AbstractModule(object):
     """
     return tuple(v for v in self.variables if not v.trainable)
 
-  def get_variables(self, collection=tf.GraphKeys.TRAINABLE_VARIABLES):
+  def get_variables(self,
+                    collection=tf.GraphKeys.TRAINABLE_VARIABLES):
     """Returns tuple of `tf.Variable`s declared inside this module.
 
     Note that this operates by searching this module's variable scope,
@@ -647,8 +650,8 @@ class AbstractModule(object):
 
     Args:
       collection: Collection to restrict query to. By default this is
-        `tf.Graphkeys.TRAINABLE_VARIABLES`, which doesn't include non-trainable
-        variables such as moving averages.
+        `tf.GraphKeys.TRAINABLE_VARIABLES`, which doesn't
+        include non-trainable variables such as moving averages.
 
     Returns:
       A tuple of `tf.Variable` objects.
@@ -672,7 +675,8 @@ class AbstractModule(object):
       return util.get_variables_in_scope(
           self.variable_scope, collection=collection)
 
-  def get_all_variables(self, collection=tf.GraphKeys.TRAINABLE_VARIABLES):
+  def get_all_variables(self,
+                        collection=tf.GraphKeys.TRAINABLE_VARIABLES):
     """Returns all `tf.Variable`s used when the module is connected.
 
     See the documentation for `AbstractModule._capture_variables()` for more
@@ -680,8 +684,8 @@ class AbstractModule(object):
 
     Args:
       collection: Collection to restrict query to. By default this is
-        `tf.Graphkeys.TRAINABLE_VARIABLES`, which doesn't include non-trainable
-        variables such as moving averages.
+        `tf.GraphKeys.TRAINABLE_VARIABLES`, which doesn't
+        include non-trainable variables such as moving averages.
 
     Returns:
       A sorted (by variable name) tuple of `tf.Variable` objects.
@@ -794,7 +798,7 @@ class Module(AbstractModule):
       return lin2
 
     model = snt.Module(name='simple_mlp',
-                       build=partial(make_model, output_size=[10, 20])
+                       build=partial(make_model, output_sizes=[10, 20])
     outputs = model(inputs)
     ```
 

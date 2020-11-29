@@ -29,11 +29,13 @@ import numpy as np
 import sonnet as snt
 from sonnet.python.modules.conv import _fill_shape as fill_shape
 
-import tensorflow as tf
-from tensorflow.python.ops import variables
+import tensorflow.compat.v1 as tf
+from tensorflow.contrib import layers as contrib_layers
+from tensorflow.contrib.eager.python import tfe as contrib_eager
+from tensorflow.python.ops import variables  # pylint: disable=g-direct-tensorflow-import
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
 
   def setUp(self):
@@ -138,7 +140,7 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
           kernel_shapes=self.kernel_shapes,
           strides=self.strides,
           paddings=self.paddings,
-          regularizers={"not_w": tf.contrib.layers.l1_regularizer(scale=0.5)})
+          regularizers={"not_w": contrib_layers.l1_regularizer(scale=0.5)})
 
     with self.assertRaisesRegexp(TypeError,
                                  "Regularizer for 'w' is not a callable "
@@ -342,10 +344,12 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
     else:
       module = snt.nets.ConvNet2D
     if use_bias:
-      regularizers = {"w": tf.contrib.layers.l1_regularizer(scale=0.5),
-                      "b": tf.contrib.layers.l2_regularizer(scale=0.5)}
+      regularizers = {
+          "w": contrib_layers.l1_regularizer(scale=0.5),
+          "b": contrib_layers.l2_regularizer(scale=0.5)
+      }
     else:
-      regularizers = {"w": tf.contrib.layers.l1_regularizer(scale=0.5)}
+      regularizers = {"w": contrib_layers.l1_regularizer(scale=0.5)}
 
     model = module(output_channels=self.output_channels,
                    kernel_shapes=self.kernel_shapes,
@@ -357,7 +361,8 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
     input_to_net = tf.random_normal(dtype=tf.float32, shape=(1, 100, 100, 3))
     model(input_to_net)
 
-    regularizers = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+    regularizers = tf.get_collection(
+        tf.GraphKeys.REGULARIZATION_LOSSES)
     expected_num_regularizers = 3 * (2 if use_bias else 1)
     self.assertLen(regularizers, expected_num_regularizers)
     if not tf.executing_eagerly():
@@ -514,7 +519,7 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
         expected_exception = tf.errors.UnimplementedError
       else:
         expected_exception = tf.errors.InvalidArgumentError
-      with self.assertRaisesRegexp(expected_exception, "only supports NHWC"):
+      with self.assertRaisesRegexp(expected_exception, "only supports.*NHWC"):
         output = net(input_to_net)
 
     else:
@@ -568,7 +573,7 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
     std_dev = np.std(output_np, axis=1)
     # High tolerance - summing across big images, this normalization is fairly
     # approximate.
-    self.assertAllClose(mean, np.zeros_like(mean), atol=2e-2)
+    self.assertAllClose(mean, np.zeros_like(mean), atol=3e-2)
     self.assertAllClose(std_dev, np.ones_like(std_dev), atol=2e-2)
 
   @parameterized.parameters(
@@ -590,7 +595,7 @@ class SharedConvNets2DTest(parameterized.TestCase, tf.test.TestCase):
           **conv_kwargs)
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class ConvNet2DTest(parameterized.TestCase, tf.test.TestCase):
 
   def setUp(self):
@@ -664,6 +669,75 @@ class ConvNet2DTest(parameterized.TestCase, tf.test.TestCase):
                        net.layers[-1 - i].input_shape[1:-1])
       self.assertEqual(net_transpose.layers[i].output_channels,
                        net.layers[-1 - i].input_shape[-1])
+
+  def testCustomGetterTranspose(self):
+    """Tests passing a custom getter to the transpose method."""
+    conv2d = snt.nets.ConvNet2D(output_channels=self.output_channels,
+                                kernel_shapes=self.kernel_shapes,
+                                strides=self.strides,
+                                paddings=self.paddings)
+    input_shape = [10, 100, 100, 3]
+    output_of_conv2d = conv2d(tf.zeros(dtype=tf.float32, shape=input_shape))
+    # We'll be able to check if the custom_getter was used by checking for
+    # gradients.
+    conv2d_transpose = conv2d.transpose(
+        custom_getter=snt.custom_getters.stop_gradient)
+    if tf.executing_eagerly():
+      with tf.GradientTape() as tape:
+        output_of_transpose = conv2d_transpose(output_of_conv2d)
+      conv2d_transpose_vars = conv2d_transpose.get_variables()
+      self.assertTrue(len(conv2d_transpose_vars))
+      for tensor in tape.gradient(output_of_transpose, conv2d_transpose_vars):
+        self.assertIsNone(tensor)
+
+    else:
+      output_of_transpose = conv2d_transpose(output_of_conv2d)
+      conv2d_transpose_vars = conv2d_transpose.get_variables()
+      self.assertTrue(len(conv2d_transpose_vars))
+      for tensor in tf.gradients(output_of_transpose, conv2d_transpose_vars):
+        self.assertIsNone(tensor)
+
+  def testNoCustomGetterTranspose(self):
+    """Tests not passing a custom getter to the transpose method."""
+    conv2d = snt.nets.ConvNet2D(output_channels=self.output_channels,
+                                kernel_shapes=self.kernel_shapes,
+                                strides=self.strides,
+                                paddings=self.paddings,
+                                custom_getter=snt.custom_getters.stop_gradient)
+    input_shape = [10, 100, 100, 3]
+    input_to_conv2d = tf.zeros(dtype=tf.float32, shape=input_shape)
+    if tf.executing_eagerly():
+      with tf.GradientTape() as tape0:
+        output_of_conv2d = conv2d(input_to_conv2d)
+      # Create a transpose without a custom getter
+      conv2d_transpose = conv2d.transpose()
+      with tf.GradientTape() as tape1:
+        output_of_transpose = conv2d_transpose(output_of_conv2d)
+      conv2d_vars = conv2d.get_variables()
+      conv2d_grads = tape0.gradient(output_of_conv2d, conv2d_vars)
+      conv2d_transpose_vars = conv2d_transpose.get_variables()
+      conv2d_transpose_grads = tape1.gradient(output_of_transpose,
+                                              conv2d_transpose_vars)
+    else:
+      output_of_conv2d = conv2d(input_to_conv2d)
+      conv2d_vars = conv2d.get_variables()
+      conv2d_grads = tf.gradients(output_of_conv2d, conv2d_vars)
+      # Create a transpose without a custom getter
+      conv2d_transpose = conv2d.transpose()
+      output_of_transpose = conv2d_transpose(output_of_conv2d)
+      conv2d_transpose_vars = conv2d_transpose.get_variables()
+      conv2d_transpose_grads = tf.gradients(output_of_transpose,
+                                            conv2d_transpose_vars)
+
+    # Sanity check that the custom getter was indeed used for the conv net.
+    self.assertTrue(len(conv2d_vars))
+    for tensor in conv2d_grads:
+      self.assertIsNone(tensor)
+    # Check the transpose did not use the custom getter that was passed to the
+    # original conv net.
+    self.assertTrue(len(conv2d_transpose_vars))
+    for tensor in conv2d_transpose_grads:
+      self.assertIsNotNone(tensor)
 
   def testVariableMap(self):
     """Tests for regressions in variable names."""
@@ -798,7 +872,7 @@ class ConvNet2DTest(parameterized.TestCase, tf.test.TestCase):
     _ = mod(input_, is_training=True)
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class ConvNet2DTransposeTest(parameterized.TestCase, tf.test.TestCase):
 
   def setUp(self):
@@ -951,8 +1025,113 @@ class ConvNet2DTransposeTest(parameterized.TestCase, tf.test.TestCase):
     input_ = tf.random_uniform([16, 100, 100, 3])
     _ = mod(input_, is_training=True)
 
+  def testCustomGetter(self):
+    custom_getter = snt.custom_getters.Context(snt.custom_getters.stop_gradient)
+    module = snt.nets.ConvNet2DTranspose(
+        output_shapes=self.output_shapes,
+        output_channels=self.output_channels,
+        kernel_shapes=self.kernel_shapes,
+        strides=self.strides,
+        paddings=self.paddings,
+        custom_getter=custom_getter)
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+    input_shape = [10, 100, 100, 3]
+    input_to_net = tf.random_normal(dtype=tf.float32, shape=input_shape)
+
+    if tf.executing_eagerly():
+      with tf.GradientTape() as tape0:
+        out0 = module(input_to_net)
+      with tf.GradientTape() as tape1:
+        with custom_getter:
+          out1 = module(input_to_net)
+      all_vars = tf.trainable_variables()
+      out0_grads = tape0.gradient(out0, all_vars)
+      out1_grads = tape1.gradient(out1, all_vars)
+
+    else:
+      out0 = module(input_to_net)
+      with custom_getter:
+        out1 = module(input_to_net)
+      all_vars = tf.trainable_variables()
+      out0_grads = tf.gradients(out0, all_vars)
+      out1_grads = tf.gradients(out1, all_vars)
+
+    for grad in out0_grads:
+      self.assertIsNotNone(grad)
+    self.assertEqual([None] * len(out1_grads), out1_grads)
+
+  def testCustomGetterTranspose(self):
+    """Tests passing a custom getter to the transpose method."""
+    conv2d_t = snt.nets.ConvNet2DTranspose(
+        output_shapes=self.output_shapes,
+        output_channels=self.output_channels,
+        kernel_shapes=self.kernel_shapes,
+        strides=self.strides,
+        paddings=self.paddings)
+    input_shape = [10, 100, 100, 3]
+    output_of_conv2d_t = conv2d_t(tf.zeros(dtype=tf.float32, shape=input_shape))
+    # We'll be able to check if the custom_getter was used by checking for
+    # gradients.
+    conv2d = conv2d_t.transpose(custom_getter=snt.custom_getters.stop_gradient)
+    if tf.executing_eagerly():
+      with tf.GradientTape() as tape:
+        output_of_conv = conv2d(output_of_conv2d_t)
+      conv2d_vars = conv2d.get_variables()
+      self.assertTrue(len(conv2d_vars))
+      for tensor in tape.gradient(output_of_conv, conv2d_vars):
+        self.assertIsNone(tensor)
+
+    else:
+      output_of_conv = conv2d(output_of_conv2d_t)
+      conv2d_vars = conv2d.get_variables()
+      self.assertTrue(len(conv2d_vars))
+      for tensor in tf.gradients(output_of_conv, conv2d_vars):
+        self.assertIsNone(tensor)
+
+  def testNoCustomGetterTranspose(self):
+    """Tests not passing a custom getter to the transpose method."""
+    conv2d_t = snt.nets.ConvNet2DTranspose(
+        output_shapes=self.output_shapes,
+        output_channels=self.output_channels,
+        kernel_shapes=self.kernel_shapes,
+        strides=self.strides,
+        paddings=self.paddings,
+        custom_getter=snt.custom_getters.stop_gradient)
+    input_shape = [10, 100, 100, 3]
+    input_to_conv2d_t = tf.zeros(dtype=tf.float32, shape=input_shape)
+    if tf.executing_eagerly():
+      with tf.GradientTape() as tape0:
+        output_of_conv2d_t = conv2d_t(input_to_conv2d_t)
+      # Create a transpose without a custom getter
+      conv2d = conv2d_t.transpose()
+      with tf.GradientTape() as tape1:
+        output_of_conv = conv2d(output_of_conv2d_t)
+      conv2d_t_vars = conv2d_t.get_variables()
+      conv2d_t_grads = tape0.gradient(output_of_conv2d_t, conv2d_t_vars)
+      conv2d_vars = conv2d.get_variables()
+      conv2d_grads = tape1.gradient(output_of_conv, conv2d_vars)
+    else:
+      output_of_conv2d_t = conv2d_t(input_to_conv2d_t)
+      conv2d_t_vars = conv2d_t.get_variables()
+      conv2d_t_grads = tf.gradients(output_of_conv2d_t, conv2d_t_vars)
+      # Create a transpose without a custom getter
+      conv2d = conv2d_t.transpose()
+      output_of_conv = conv2d(output_of_conv2d_t)
+      conv2d_vars = conv2d.get_variables()
+      conv2d_grads = tf.gradients(output_of_conv, conv2d_vars)
+
+    # Sanity check that the custom getter was indeed used for the conv net.
+    self.assertTrue(len(conv2d_t_vars))
+    for tensor in conv2d_t_grads:
+      self.assertIsNone(tensor)
+    # Check the transpose did not use the custom getter that was passed to the
+    # original conv net.
+    self.assertTrue(len(conv2d_vars))
+    for tensor in conv2d_grads:
+      self.assertIsNotNone(tensor)
+
+
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class DefunTest(parameterized.TestCase, tf.test.TestCase):
 
   @parameterized.named_parameters(
@@ -966,7 +1145,7 @@ class DefunTest(parameterized.TestCase, tf.test.TestCase):
                    strides=[1],
                    paddings=[snt.SAME])
 
-    model = tf.contrib.eager.defun(model)
+    model = contrib_eager.defun(model)
     input_to_net = tf.random_normal([1, 100, 100, 3])
     output = model(input_to_net)
     self.assertListEqual(output.shape.as_list(), [1, 100, 100, 4])

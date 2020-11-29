@@ -28,24 +28,26 @@ from six.moves import xrange  # pylint: disable=redefined-builtin
 import sonnet as snt
 from sonnet.python.modules import basic
 from sonnet.python.ops import nest
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+from tensorflow.contrib import layers as contrib_layers
+from tensorflow.contrib import nn as contrib_nn
+from tensorflow.contrib.eager.python import tfe as contrib_eager
 
-from tensorflow.python.client import device_lib
-from tensorflow.python.ops import init_ops
-from tensorflow.python.ops import variables
+from tensorflow.python.client import device_lib  # pylint: disable=g-direct-tensorflow-import
+from tensorflow.python.ops import variables  # pylint: disable=g-direct-tensorflow-import
 
 
 def _test_initializer(mu=0.0, sigma=1.0, dtype=tf.float32):
   """Custom initializer for Linear tests."""
   def _initializer(shape,
-                   dtype=init_ops._assert_float_dtype(dtype),
+                   dtype=dtype,
                    partition_info=None):  # pylint: disable=unused-argument
     random_normal_tensor = np.asarray(np.random.randn(*shape)) * sigma + mu
-    return random_normal_tensor.astype(dtype.as_numpy_dtype())
+    return random_normal_tensor.astype(dtype.as_numpy_dtype)
   return _initializer
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class ConcatLinearTest(tf.test.TestCase, parameterized.TestCase):
 
   def setUp(self):
@@ -74,7 +76,7 @@ class ConcatLinearTest(tf.test.TestCase, parameterized.TestCase):
     self.assertEqual(lin.module_name, mod_name)
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class LinearTest(tf.test.TestCase, parameterized.TestCase):
 
   def setUp(self):
@@ -213,6 +215,55 @@ class LinearTest(tf.test.TestCase, parameterized.TestCase):
   @parameterized.named_parameters(
       ("WithBias", True),
       ("WithoutBias", False))
+  def testBatchedComputation(self, use_bias):
+    np.random.seed(self.seed)
+    types = (tf.float16, tf.float32, tf.float64)
+    tol = (1e-1, 1e-6, 1e-9)
+
+    tolerance_map = dict(zip(types, tol))
+
+    for dtype in types:
+      # With random data, check the TF calculation matches the Numpy version.
+      input_data = np.random.randn(
+          self.batch_size, self.batch_size, self.in_size)
+      flat_input_data = np.reshape(
+          input_data, [self.batch_size * self.batch_size, self.in_size])
+      input_data = input_data.astype(dtype.as_numpy_dtype)
+      inputs = tf.constant(input_data)
+
+      if use_bias:
+        initializers = {"w": _test_initializer(), "b": _test_initializer()}
+      else:
+        initializers = {"w": _test_initializer()}
+
+      lin = snt.Linear(output_size=self.out_size, use_bias=use_bias,
+                       allow_many_batch_dims=True, initializers=initializers)
+      output = lin(inputs)
+
+      self.evaluate(tf.global_variables_initializer())
+
+      if use_bias:
+        output_data, w, b = self.evaluate([output, lin.w, lin.b])
+      else:
+        output_data, w = self.evaluate([output, lin.w])
+
+      if use_bias:
+        result = (np.dot(flat_input_data, w.astype(dtype.as_numpy_dtype)) +
+                  b.astype(dtype.as_numpy_dtype))
+      else:
+        result = np.dot(flat_input_data, w.astype(dtype.as_numpy_dtype))
+      result = np.reshape(
+          result, [self.batch_size, self.batch_size, self.out_size])
+
+      self.assertAllClose(
+          output_data,
+          result,
+          atol=tolerance_map[dtype],
+          rtol=tolerance_map[dtype])
+
+  @parameterized.named_parameters(
+      ("WithBias", True),
+      ("WithoutBias", False))
   def testSharing(self, use_bias):
 
     np.random.seed(self.seed)
@@ -325,7 +376,7 @@ class LinearTest(tf.test.TestCase, parameterized.TestCase):
     with self.assertRaisesRegexp(KeyError, "Invalid regularizer keys.*"):
       snt.Linear(
           output_size=self.out_size,
-          regularizers={"not_w": tf.contrib.layers.l1_regularizer(scale=0.5)})
+          regularizers={"not_w": contrib_layers.l1_regularizer(scale=0.5)})
 
     err = "Regularizer for 'w' is not a callable function"
     with self.assertRaisesRegexp(TypeError, err):
@@ -334,13 +385,14 @@ class LinearTest(tf.test.TestCase, parameterized.TestCase):
 
   def testRegularizersInRegularizationLosses(self):
     inputs = tf.zeros([1, 100])
-    w_regularizer = tf.contrib.layers.l1_regularizer(scale=0.5)
-    b_regularizer = tf.contrib.layers.l2_regularizer(scale=0.5)
+    w_regularizer = contrib_layers.l1_regularizer(scale=0.5)
+    b_regularizer = contrib_layers.l2_regularizer(scale=0.5)
     lin = snt.Linear(output_size=100,
                      regularizers={"w": w_regularizer, "b": b_regularizer})
     lin(inputs)
 
-    regularizers = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+    regularizers = tf.get_collection(
+        tf.GraphKeys.REGULARIZATION_LOSSES)
     self.assertLen(regularizers, 2)
     if not tf.executing_eagerly():
       self.assertRegexpMatches(regularizers[0].name, ".*l1_regularizer.*")
@@ -451,7 +503,7 @@ class LinearTest(tf.test.TestCase, parameterized.TestCase):
       with tf.device("/gpu:*"):
         outputs = linear(inputs)
       # Calculate the loss.
-      cross_entropy = tf.contrib.nn.deprecated_flipped_sparse_softmax_cross_entropy_with_logits(  # pylint: disable=line-too-long
+      cross_entropy = contrib_nn.deprecated_flipped_sparse_softmax_cross_entropy_with_logits(  # pylint: disable=line-too-long
           outputs, labels, name="xentropy")
       loss = tf.reduce_mean(cross_entropy, name="xentropy_mean")
       # Optimizer.
@@ -513,7 +565,7 @@ class LinearTest(tf.test.TestCase, parameterized.TestCase):
     self.assertEqual(outputs.dtype.base_dtype, dtype)
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class AddBiasTest(tf.test.TestCase, parameterized.TestCase):
 
   BATCH_SIZE = 11
@@ -584,7 +636,7 @@ class AddBiasTest(tf.test.TestCase, parameterized.TestCase):
     types = (tf.float16, tf.float32, tf.float64)
     tol = (1e-2, 1e-6, 1e-9)
     tolerance_map = dict(zip(types, tol))
-    b_regularizer = tf.contrib.layers.l2_regularizer(scale=0.5)
+    b_regularizer = contrib_layers.l2_regularizer(scale=0.5)
     for dtype in types:
       # With random data, check the TF calculation matches the Numpy version.
       input_data = np.random.randn(*self.mb_in_shape).astype(
@@ -598,7 +650,8 @@ class AddBiasTest(tf.test.TestCase, parameterized.TestCase):
       self.evaluate(tf.global_variables_initializer())
       output_data, output_subtract_data, b = self.evaluate(
           [output, output_subtract, add.b])
-      regularizers = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+      regularizers = tf.get_collection(
+          tf.GraphKeys.REGULARIZATION_LOSSES)
       if not tf.executing_eagerly():
         self.assertRegexpMatches(regularizers[0].name, ".*l2_regularizer.*")
       if not bias_shape:  # Scalar bias.
@@ -699,7 +752,7 @@ class AddBiasTest(tf.test.TestCase, parameterized.TestCase):
     with self.assertRaisesRegexp(KeyError, "Invalid regularizer keys.*"):
       snt.AddBias(
           bias_dims=bias_dims,
-          regularizers={"not_b": tf.contrib.layers.l1_regularizer(scale=0.5)})
+          regularizers={"not_b": contrib_layers.l1_regularizer(scale=0.5)})
 
     err = "Regularizer for 'b' is not a callable function"
     with self.assertRaisesRegexp(TypeError, err):
@@ -740,7 +793,7 @@ class AddBiasTest(tf.test.TestCase, parameterized.TestCase):
     self.assertEqual(type(bias.b), variables.PartitionedVariable)
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class TrainableVariableTest(tf.test.TestCase, parameterized.TestCase):
 
   def testName(self):
@@ -839,7 +892,7 @@ class TrainableVariableTest(tf.test.TestCase, parameterized.TestCase):
       snt.TrainableVariable(
           name=variable_name,
           shape=[1],
-          regularizers={"not_w": tf.contrib.layers.l1_regularizer(scale=0.5)})
+          regularizers={"not_w": contrib_layers.l1_regularizer(scale=0.5)})
 
     err = "Regularizer for 'w' is not a callable function"
     with self.assertRaisesRegexp(TypeError, err):
@@ -848,12 +901,13 @@ class TrainableVariableTest(tf.test.TestCase, parameterized.TestCase):
 
   def testRegularizersInRegularizationLosses(self):
     variable_name = "trainable_variable"
-    w_regularizer = tf.contrib.layers.l1_regularizer(scale=0.5)
+    w_regularizer = contrib_layers.l1_regularizer(scale=0.5)
     var = snt.TrainableVariable(
         name=variable_name, shape=[1], regularizers={"w": w_regularizer})
     var()
 
-    regularizers = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+    regularizers = tf.get_collection(
+        tf.GraphKeys.REGULARIZATION_LOSSES)
     if tf.executing_eagerly():
       # Tensor name is not supported in eager mode.
       self.assertLen(regularizers, 1)
@@ -905,7 +959,7 @@ class TrainableVariableTest(tf.test.TestCase, parameterized.TestCase):
       self.assertIsNotNone(grads[0])
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class BatchReshapeTest(tf.test.TestCase, parameterized.TestCase):
 
   def testName(self):
@@ -1034,7 +1088,7 @@ class BatchReshapeTest(tf.test.TestCase, parameterized.TestCase):
     inputs = tf.ones(dtype=tf.float32, shape=[batch_size] + in_shape)
     mod = snt.BatchReshape(shape=out_size)
     output = mod(inputs)
-    flattened_shape = np.prod(in_shape)
+    flattened_shape = np.prod(in_shape, dtype=int)
     self.assertEqual(output.get_shape(), [batch_size, flattened_shape])
 
   def testUnknown(self):
@@ -1046,7 +1100,7 @@ class BatchReshapeTest(tf.test.TestCase, parameterized.TestCase):
     inputs = tf.placeholder(tf.float32, shape=[batch_size] + in_shape)
     mod = snt.BatchReshape(shape=out_size)
     output = mod(inputs)
-    flattened_shape = np.prod(in_shape)
+    flattened_shape = np.prod(in_shape, dtype=int)
     self.assertEqual(output.get_shape().as_list(),
                      [batch_size, flattened_shape])
 
@@ -1145,7 +1199,7 @@ class BatchReshapeTest(tf.test.TestCase, parameterized.TestCase):
     self.assertAllEqual(actual_output, expected_output)
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class MergeLeadingDimsTest(tf.test.TestCase, parameterized.TestCase):
   """Tests the merge_leading_dims function."""
 
@@ -1187,7 +1241,7 @@ class MergeLeadingDimsTest(tf.test.TestCase, parameterized.TestCase):
     self.assertEqual(output.shape.as_list(), expected_output_shape)
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class BatchFlattenTest(tf.test.TestCase, parameterized.TestCase):
 
   def testName(self):
@@ -1203,7 +1257,7 @@ class BatchFlattenTest(tf.test.TestCase, parameterized.TestCase):
     inputs = tf.ones(dtype=tf.float32, shape=[batch_size] + in_shape)
     mod = snt.BatchFlatten()
     output = mod(inputs)
-    flattened_size = np.prod(in_shape)
+    flattened_size = np.prod(in_shape, dtype=int)
     self.assertEqual(output.get_shape(), [batch_size, flattened_size])
 
   @parameterized.parameters(1, 2, 3, 4)
@@ -1213,7 +1267,7 @@ class BatchFlattenTest(tf.test.TestCase, parameterized.TestCase):
     mod = snt.BatchFlatten(preserve_dims=preserve_dims)
     output = mod(inputs)
     flattened_shape = (in_shape[:preserve_dims] +
-                       [np.prod(in_shape[preserve_dims:])])
+                       [np.prod(in_shape[preserve_dims:], dtype=int)])
     self.assertEqual(output.get_shape(), flattened_shape)
 
   @parameterized.parameters(5, 6, 7, 10)
@@ -1231,7 +1285,7 @@ class BatchFlattenTest(tf.test.TestCase, parameterized.TestCase):
     self.assertEqual(output.get_shape(), [1, 0])
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class FlattenTrailingDimensionsTest(tf.test.TestCase, parameterized.TestCase):
 
   def testName(self):
@@ -1275,7 +1329,7 @@ class FlattenTrailingDimensionsTest(tf.test.TestCase, parameterized.TestCase):
     for dim_from in xrange(1, len(shape)):
       mod = snt.FlattenTrailingDimensions(dim_from)
       output = mod(inputs)
-      trailing = np.prod(shape[dim_from:])
+      trailing = np.prod(shape[dim_from:], dtype=int)
       self.assertEqual(output.get_shape().as_list(),
                        shape[:dim_from] + [trailing])
 
@@ -1299,7 +1353,7 @@ class FlattenTrailingDimensionsTest(tf.test.TestCase, parameterized.TestCase):
     self.assertEqual(final.get_shape().as_list(), initial_shape)
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class BatchApplyTest(tf.test.TestCase, parameterized.TestCase):
 
   def testName(self):
@@ -1540,7 +1594,7 @@ class BatchApplyTest(tf.test.TestCase, parameterized.TestCase):
     self.assertEqual(received_flag_value[0], flag_value)
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class SliceByDimTest(tf.test.TestCase):
 
   def testName(self):
@@ -1646,7 +1700,7 @@ class SliceByDimTest(tf.test.TestCase):
       _ = snt.SliceByDim(dims=dims, begin=begin, size=size)
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class TileByDimTest(tf.test.TestCase):
 
   def testName(self):
@@ -1711,7 +1765,7 @@ class TileByDimTest(tf.test.TestCase):
       snt.TileByDim(dims=dims, multiples=multiples)
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class MergeDimsTest(tf.test.TestCase, parameterized.TestCase):
 
   def testName(self):
@@ -1840,13 +1894,13 @@ class MergeDimsTest(tf.test.TestCase, parameterized.TestCase):
       merged_shape = merged_tensor.get_shape()
       self.assertEqual(original_shape.ndims - (size - 1),
                        merged_shape.ndims)
-      self.assertEqual(np.prod(original_shape[start:start + size]),
+      self.assertEqual(np.prod(original_shape[start:start + size], dtype=int),
                        merged_shape[start])
       self.assertEqual(original_shape.num_elements(),
                        merged_shape.num_elements())
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class SelectInputTest(tf.test.TestCase):
 
   def testName(self):

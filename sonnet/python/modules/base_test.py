@@ -29,9 +29,10 @@ import numpy as np
 import six
 from sonnet.python.modules import base
 from sonnet.python.modules.base_errors import NotSupportedError
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+from tensorflow.contrib.eager.python import tfe as contrib_eager
 
-tfe = tf.contrib.eager
+tfe = contrib_eager
 logging = tf.logging
 
 
@@ -131,7 +132,7 @@ class ModuleWithSubmodules(base.AbstractModule):
     return d(self._submodule_a(inputs)) +  self._submodule_b(c(inputs))  # pylint: disable=not-callable
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class AbstractModuleTest(parameterized.TestCase, tf.test.TestCase):
 
   def testInitializerKeys(self):
@@ -423,8 +424,8 @@ class AbstractModuleTest(parameterized.TestCase, tf.test.TestCase):
         "simple_submodule/w:0",
     ], all_variable_names)
 
-    self.assertEmpty(
-        module.get_all_variables(collection=tf.GraphKeys.LOCAL_VARIABLES))
+    self.assertEmpty(module.get_all_variables(
+        collection=tf.GraphKeys.LOCAL_VARIABLES))
 
     # Create another ModuleWithSubmodules with the same submodules
     module = ModuleWithSubmodules(
@@ -544,7 +545,7 @@ def _make_model_with_params(inputs, output_size):
   return tf.matmul(inputs, weight)
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class ModuleTest(tf.test.TestCase):
 
   def testFunctionType(self):
@@ -704,7 +705,7 @@ class MatMulModule(base.AbstractModule):
     return x * self.w
 
 
-# @tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
+@contrib_eager.run_all_tests_in_graph_and_eager_modes
 class DefunTest(tf.test.TestCase):
 
   def testDefunWrappedProperty(self):
